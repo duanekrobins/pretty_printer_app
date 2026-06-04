@@ -1,4 +1,73 @@
 #!/usr/bin/env python3
+"""
+TestSavvy XML / Excel / JSON Pretty Printer and Markdown Documentation Generator
+
+Developer: Duane K Robinson
+Organization: State of Utah
+Date: March 11th 2026
+
+Program Purpose
+---------------
+This Python program converts machine-generated automation artifacts into
+human-readable Markdown documentation suitable for review, troubleshooting,
+knowledge-base storage, and AI-assisted ingestion tools such as NotebookLM.
+
+The program is configuration-driven. Runtime behavior is controlled by a JSON
+configuration file passed with the --config command-line argument.
+
+Primary Capabilities
+--------------------
+1. XML Processing
+   - Reads XML files from configured input directories.
+   - Supports raw XML pretty-print output.
+   - Supports enhanced TestSavvy execution report output.
+   - Extracts TestSavvy automation_sequence metadata.
+   - Maps automation_sequence id to both Test Case ID and Automation Sequence ID.
+   - Extracts scenario metadata, scenario attributes, step metadata, runtime
+     variables, machine settings, execution summary fields, and raw attributes.
+   - Optionally appends a full XML Inventory section listing every parsed node,
+     node path, depth, attributes, and text.
+
+2. Markdown Generation
+   - Writes Markdown files using the configured output extension.
+   - Supports one output Markdown file per input file.
+   - Supports combined Markdown output for multiple input files.
+   - Structures TestSavvy XML data into sections suitable for NotebookLM,
+     repository documentation, and human QA review.
+
+3. Excel Processing
+   - Reads .xlsx and .xlsm workbooks.
+   - Converts each worksheet/tab into a Markdown table.
+   - Supports one Markdown output per worksheet.
+   - Supports combined output when configured.
+
+4. JSON Processing
+   - Pretty prints JSON.
+   - Can wrap pretty-printed JSON in Markdown code fences when output is .md.
+
+Recommended NotebookLM Use
+--------------------------
+For NotebookLM ingestion, use:
+- xml_output_mode: "testsavvy_execution_report"
+- include_xml_inventory: true
+- output_extension: ".md"
+
+This gives NotebookLM both a human-readable execution report and a complete
+node/attribute inventory so XML details are not silently omitted.
+
+Typical Command
+---------------
+python pretty_printer.py --config pretty_print_config.json
+
+Important Notes
+---------------
+- This utility is intentionally read-only with respect to source files.
+- Output files are written only to the configured output directory.
+- overwrite=true allows regenerated output to replace previous output.
+- The parser is optimized for TestSavvy execution XML payloads but also retains
+  raw XML output support for debugging and exact source review.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -40,6 +109,9 @@ class AppConfig:
 
 
 def _normalize_extension(ext: Optional[str]) -> Optional[str]:
+    """
+    Normalize a configured output extension so values like 'md' and '.md' behave consistently.
+    """
     if ext is None:
         return None
     ext = str(ext).strip()
@@ -50,7 +122,14 @@ def _normalize_extension(ext: Optional[str]) -> Optional[str]:
     return ext.lower()
 
 
+
+# -----------------------------------------------------------------------------
+# Configuration loading and validation
+# -----------------------------------------------------------------------------
 def load_config(config_path: Path) -> AppConfig:
+    """
+    Read the JSON configuration file, validate key options, normalize paths and extensions, and return an immutable AppConfig object.
+    """
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
@@ -124,10 +203,16 @@ def load_config(config_path: Path) -> AppConfig:
 
 
 def is_excluded(path: Path, patterns: Tuple[str, ...]) -> bool:
+    """
+    Return True when a source file name matches one of the configured exclude glob patterns.
+    """
     return any(fnmatch.fnmatch(path.name, pat) for pat in patterns) if patterns else False
 
 
 def iter_files(input_dir: Path, recursive: bool, file_types: Tuple[str, ...]) -> Iterable[Path]:
+    """
+    Yield source files from an input directory according to recursion and configured file extensions.
+    """
     if not input_dir.exists():
         return
     walker = input_dir.rglob if recursive else input_dir.glob
@@ -140,12 +225,18 @@ def iter_files(input_dir: Path, recursive: bool, file_types: Tuple[str, ...]) ->
 
 
 def apply_output_extension(filename: str, forced_ext: Optional[str]) -> str:
+    """
+    Apply the configured output extension to a file name while preserving the base stem.
+    """
     if forced_ext is None or forced_ext == "":
         return filename
     return Path(filename).with_suffix(forced_ext).name
 
 
 def compute_output_path(src: Path, input_root: Path, output_dir: Path, output_structure: str, forced_ext: Optional[str]) -> Path:
+    """
+    Build the destination output path for an input file using either mirror or flat output structure.
+    """
     if output_structure == "flat":
         return output_dir / apply_output_extension(src.name, forced_ext)
     rel = src.relative_to(input_root)
@@ -153,16 +244,25 @@ def compute_output_path(src: Path, input_root: Path, output_dir: Path, output_st
 
 
 def ensure_parent_dir(path: Path) -> None:
+    """
+    Create the parent directory for an output file if it does not already exist.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def pretty_print_json(src: Path, indent: int, sort_keys: bool) -> str:
+    """
+    Load JSON and serialize it back out with configured indentation and optional sorted keys.
+    """
     text = src.read_text(encoding="utf-8")
     obj = json.loads(text)
     return json.dumps(obj, indent=indent, ensure_ascii=False, sort_keys=sort_keys) + "\n"
 
 
 def pretty_print_xml(src: Path, indent: int, encoding: str, preserve_declaration: bool) -> bytes:
+    """
+    Parse XML, apply indentation, and serialize it back to bytes using the configured XML encoding and declaration preference.
+    """
     tree = ET.parse(str(src), parser=ET.XMLParser())
     ET.indent(tree, space=" " * indent)
     buf = io.BytesIO()
@@ -177,20 +277,32 @@ def pretty_print_xml(src: Path, indent: int, encoding: str, preserve_declaration
 
 
 def wrap_xml_markdown(src: Path, xml_text: str) -> str:
+    """
+    Wrap pretty-printed XML text inside a Markdown XML code fence.
+    """
     return f"# Pretty Printed XML\n\n**Source file:** `{src.name}`\n\n```xml\n{xml_text.rstrip()}\n```\n"
 
 
 def wrap_json_markdown(src: Path, json_text: str) -> str:
+    """
+    Wrap pretty-printed JSON text inside a Markdown JSON code fence.
+    """
     return f"# Pretty Printed JSON\n\n**Source file:** `{src.name}`\n\n```json\n{json_text.rstrip()}\n```\n"
 
 
 def sanitize_sheet_name(sheet_name: str) -> str:
+    """
+    Convert an Excel worksheet name into a safe filename component.
+    """
     value = re.sub(r"[^\w\-. ]+", "_", sheet_name.strip())
     value = re.sub(r"\s+", "_", value)
     return value or "Sheet"
 
 
 def markdown_escape(value: object, max_len: int = 500) -> str:
+    """
+    Escape Markdown table-sensitive characters and normalize whitespace so cell content renders safely.
+    """
     text = "" if value is None else str(value)
     text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
     text = text.replace("|", "\\|")
@@ -201,13 +313,23 @@ def markdown_escape(value: object, max_len: int = 500) -> str:
 
 
 def worksheet_has_data(ws) -> bool:
+    """
+    Check whether an Excel worksheet contains at least one non-empty cell.
+    """
     for row in ws.iter_rows(values_only=True):
         if any(cell not in (None, "") for cell in row):
             return True
     return False
 
 
+
+# -----------------------------------------------------------------------------
+# Excel worksheet to Markdown conversion
+# -----------------------------------------------------------------------------
 def worksheet_to_markdown(src: Path, ws, max_cell_length: int) -> str:
+    """
+    Convert an Excel worksheet into a Markdown table using the first non-empty row as the header row.
+    """
     rows = list(ws.iter_rows(values_only=True))
     non_empty_rows = []
     max_cols = 0
@@ -271,6 +393,9 @@ def build_excel_sheet_output_path(
     sheet_name: str,
     include_sheet_name_in_filename: bool,
 ) -> Path:
+    """
+    Compute the output Markdown path for a single Excel worksheet export.
+    """
     ext = forced_ext if forced_ext not in (None, "") else ".md"
     safe_sheet = sanitize_sheet_name(sheet_name)
 
@@ -286,6 +411,9 @@ def build_excel_sheet_output_path(
 
 
 def process_excel_workbook(src: Path, cfg: AppConfig, input_root: Path):
+    """
+    Process an Excel workbook and write one Markdown file per worksheet when in per-sheet mode.
+    """
     messages = []
     written = 0
     failed = 0
@@ -327,10 +455,16 @@ def process_excel_workbook(src: Path, cfg: AppConfig, input_root: Path):
 
 
 def local_name(tag: str) -> str:
+    """
+    Return an XML tag name without namespace decoration.
+    """
     return tag.split("}", 1)[-1] if "}" in tag else tag
 
 
 def element_children_map(elem: ET.Element) -> Dict[str, List[ET.Element]]:
+    """
+    Build a dictionary of child XML elements grouped by local tag name.
+    """
     result: Dict[str, List[ET.Element]] = {}
     for child in list(elem):
         result.setdefault(local_name(child.tag), []).append(child)
@@ -345,6 +479,9 @@ def element_text(elem: Optional[ET.Element]) -> str:
 
 
 def first_text_anywhere(root: ET.Element, names: List[str]) -> str:
+    """
+    Search the XML tree for the first matching tag name and return its text content.
+    """
     wanted = {n.lower() for n in names}
     for elem in root.iter():
         if local_name(elem.tag).lower() in wanted:
@@ -355,6 +492,9 @@ def first_text_anywhere(root: ET.Element, names: List[str]) -> str:
 
 
 def find_execution_nodes(root: ET.Element, names: List[str]) -> List[ET.Element]:
+    """
+    Find XML elements whose local tag names match the supplied list of candidate names.
+    """
     wanted = {n.lower() for n in names}
     found = []
     for elem in root.iter():
@@ -364,6 +504,9 @@ def find_execution_nodes(root: ET.Element, names: List[str]) -> List[ET.Element]
 
 
 def parse_datetime_text(text: str) -> str:
+    """
+    Attempt to normalize known datetime formats while preserving unrecognized strings.
+    """
     if not text:
         return ""
     candidates = [
@@ -382,6 +525,9 @@ def parse_datetime_text(text: str) -> str:
 
 
 def normalize_bool_text(value: str) -> str:
+    """
+    Normalize boolean-like text values to Yes or No when possible.
+    """
     v = (value or "").strip().lower()
     if v in {"true", "1", "yes", "y"}:
         return "Yes"
@@ -390,7 +536,14 @@ def normalize_bool_text(value: str) -> str:
     return value
 
 
+
+# -----------------------------------------------------------------------------
+# TestSavvy XML extraction helpers
+# -----------------------------------------------------------------------------
 def extract_runtime_variables(root: ET.Element) -> List[Tuple[str, str]]:
+    """
+    Extract runtime variables from TestSavvy runtime variable nodes and attribute-based variable entries.
+    """
     vars_out: List[Tuple[str, str]] = []
 
     candidate_parents = []
@@ -458,6 +611,9 @@ def extract_runtime_variables(root: ET.Element) -> List[Tuple[str, str]]:
 
 
 def extract_step_records(scenario_elem: ET.Element) -> List[Dict[str, str]]:
+    """
+    Extract TestSavvy step rows from scenario XML, including key attributes and a raw attribute inventory.
+    """
     steps: List[Dict[str, str]] = []
     for elem in scenario_elem.iter():
         lname = local_name(elem.tag).lower()
@@ -500,6 +656,9 @@ def extract_step_records(scenario_elem: ET.Element) -> List[Dict[str, str]]:
 
 
 def extract_automation_sequence(root: ET.Element) -> Optional[ET.Element]:
+    """
+    Locate the top-level TestSavvy automation_sequence element in the XML document.
+    """
     for elem in root.iter():
         if local_name(elem.tag).lower() == "automation_sequence":
             return elem
@@ -507,6 +666,9 @@ def extract_automation_sequence(root: ET.Element) -> Optional[ET.Element]:
 
 
 def extract_scenarios(root: ET.Element) -> List[Dict[str, Any]]:
+    """
+    Extract TestSavvy scenario metadata and associated step records from the automation sequence.
+    """
     scenarios: List[Dict[str, Any]] = []
 
     auto_seq = extract_automation_sequence(root)
@@ -545,6 +707,9 @@ def extract_scenarios(root: ET.Element) -> List[Dict[str, Any]]:
 
 
 def detect_source_guide(root: ET.Element, src: Path) -> str:
+    """
+    Determine the best human-readable source guide or script name for the XML document.
+    """
     auto_seq = extract_automation_sequence(root)
     if auto_seq is not None:
         name = auto_seq.attrib.get("name", "").strip()
@@ -563,6 +728,9 @@ def detect_source_guide(root: ET.Element, src: Path) -> str:
 
 
 def extract_execution_summary(root: ET.Element, src: Path, scenario_count: int) -> Dict[str, str]:
+    """
+    Extract execution-level metadata, including Test Case ID from automation_sequence id.
+    """
     auto_seq = extract_automation_sequence(root)
 
     if auto_seq is not None:
@@ -624,7 +792,14 @@ def extract_execution_summary(root: ET.Element, src: Path, scenario_count: int) 
     return summary
 
 
+
+# -----------------------------------------------------------------------------
+# Full XML inventory support for completeness / NotebookLM ingestion
+# -----------------------------------------------------------------------------
 def xml_inventory_rows(root: ET.Element) -> List[Dict[str, str]]:
+    """
+    Flatten the entire XML tree into rows containing node path, tag name, depth, attributes, and text.
+    """
     rows: List[Dict[str, str]] = []
 
     def visit(elem: ET.Element, path: str, depth: int):
@@ -647,6 +822,9 @@ def xml_inventory_rows(root: ET.Element) -> List[Dict[str, str]]:
 
 
 def xml_inventory_markdown(root: ET.Element) -> List[str]:
+    """
+    Render the flattened XML inventory rows as a Markdown table.
+    """
     rows = xml_inventory_rows(root)
     lines = [
         "XML Inventory",
@@ -666,6 +844,9 @@ def xml_inventory_markdown(root: ET.Element) -> List[str]:
 
 
 def scenario_attributes_table_markdown(attributes: Dict[str, str]) -> List[str]:
+    """
+    Render scenario or automation-sequence attributes as a two-column Markdown table.
+    """
     lines = [
         "| Attribute | Value |",
         "| --- | --- |",
@@ -677,6 +858,9 @@ def scenario_attributes_table_markdown(attributes: Dict[str, str]) -> List[str]:
 
 
 def steps_table_markdown(steps: List[Dict[str, str]]) -> List[str]:
+    """
+    Render extracted TestSavvy step records as a detailed Markdown table.
+    """
     header = [
         "#", "Step ID", "Action", "Type", "English Text", "Dataset / Header",
         "Test Condition", "Encrypted", "Value", "Application", "Interface Map",
@@ -695,7 +879,14 @@ def steps_table_markdown(steps: List[Dict[str, str]]) -> List[str]:
     return lines
 
 
+
+# -----------------------------------------------------------------------------
+# Enhanced TestSavvy Markdown report generation
+# -----------------------------------------------------------------------------
 def testsavvy_execution_report_markdown(src: Path, root: ET.Element, include_xml_inventory: bool = True) -> str:
+    """
+    Build the enhanced NotebookLM-ready TestSavvy Markdown report from parsed XML.
+    """
     scenarios = extract_scenarios(root)
     runtime_vars = extract_runtime_variables(root)
     summary = extract_execution_summary(root, src, len(scenarios))
@@ -799,6 +990,9 @@ def testsavvy_execution_report_markdown(src: Path, root: ET.Element, include_xml
 
 
 def xml_to_markdown(src: Path, cfg: AppConfig) -> str:
+    """
+    Dispatch XML conversion to either raw Markdown mode or enhanced TestSavvy report mode.
+    """
     tree = ET.parse(str(src), parser=ET.XMLParser())
     root = tree.getroot()
     if cfg.xml_output_mode == "raw_markdown":
@@ -808,6 +1002,9 @@ def xml_to_markdown(src: Path, cfg: AppConfig) -> str:
 
 
 def process_standard_file(src: Path, out_path: Path, cfg: AppConfig):
+    """
+    Process JSON or XML source files and write the configured output artifact.
+    """
     if out_path.exists() and not cfg.overwrite:
         return True, f"SKIP (exists): {src}"
 
@@ -837,6 +1034,9 @@ def process_standard_file(src: Path, out_path: Path, cfg: AppConfig):
 
 
 def build_combined_section_for_file(src: Path, cfg: AppConfig) -> str:
+    """
+    Build one Markdown section for an XML or JSON file when combined output is enabled.
+    """
     ext = src.suffix.lower().lstrip(".")
     if ext == "xml":
         body = xml_to_markdown(src, cfg).strip()
@@ -848,10 +1048,20 @@ def build_combined_section_for_file(src: Path, cfg: AppConfig) -> str:
 
 
 def build_excel_combined_section(src: Path, sheet_name: str, content: str) -> str:
+    """
+    Build one Markdown section for an Excel worksheet when combined output is enabled.
+    """
     return f"# {src.name} - {sheet_name}\n\n{content.strip()}\n"
 
 
+
+# -----------------------------------------------------------------------------
+# Command-line entry point
+# -----------------------------------------------------------------------------
 def main() -> int:
+    """
+    Parse command-line arguments, load configuration, process all source files, and print a summary.
+    """
     ap = argparse.ArgumentParser(description="Process TestSavvy XML to Markdown reports and Excel tabs to Markdown.")
     ap.add_argument("--config", required=True, help="Path to config JSON")
     args = ap.parse_args()
