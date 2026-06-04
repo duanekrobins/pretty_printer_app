@@ -1,0 +1,28 @@
+{
+	"input_dirs": [
+		"./input"
+	],
+	"output_dir": "./output",
+	"file_types": [
+		"xml",
+		"xlsx",
+		"xlsm"
+	],
+	"recursive": true,
+	"overwrite": true,
+	"indent": 4,
+	"json_sort_keys": true,
+	"preserve_xml_declaration": true,
+	"xml_encoding": "utf-8",
+	"output_structure": "mirror",
+	"output_extension": ".md",
+	"exclude_patterns": [],
+	"xml_markdown_mode": "per_file",
+	"combined_output_filename": "combined_output.md",
+	"xml_output_mode": "testsavvy_execution_report",
+	"excel_markdown_mode": "per_sheet",
+	"excel_include_empty_sheets": false,
+	"excel_max_cell_length": 500,
+	"excel_sheet_name_in_filename": true,
+	"include_xml_inventory": true
+}
