@@ -1,28 +1,39 @@
 {
-	"input_dirs": [
-		"./input"
-	],
-	"output_dir": "./output",
-	"file_types": [
-		"xml",
-		"xlsx",
-		"xlsm"
-	],
-	"recursive": true,
-	"overwrite": true,
-	"indent": 4,
-	"json_sort_keys": true,
-	"preserve_xml_declaration": true,
-	"xml_encoding": "utf-8",
-	"output_structure": "mirror",
-	"output_extension": ".md",
-	"exclude_patterns": [],
-	"xml_markdown_mode": "per_file",
-	"combined_output_filename": "combined_output.md",
-	"xml_output_mode": "testsavvy_execution_report",
-	"excel_markdown_mode": "per_sheet",
-	"excel_include_empty_sheets": false,
-	"excel_max_cell_length": 500,
-	"excel_sheet_name_in_filename": true,
-	"include_xml_inventory": true
+    "input_dirs": [
+        "./input"
+    ],
+    "output_dir": "./output",
+    "file_types": [
+        "xml",
+        "json",
+        "zip",
+        "xlsx",
+        "xlsm"
+    ],
+    "recursive": true,
+    "overwrite": true,
+    "indent": 4,
+    "json_sort_keys": true,
+    "preserve_xml_declaration": true,
+    "xml_encoding": "utf-8",
+    "output_structure": "mirror",
+    "output_extension": ".md",
+    "exclude_patterns": [],
+    "xml_markdown_mode": "per_file",
+    "combined_output_filename": "combined_output.md",
+    "xml_output_mode": "testsavvy_execution_report",
+    "excel_markdown_mode": "per_sheet",
+    "excel_include_empty_sheets": false,
+    "excel_max_cell_length": 500,
+    "excel_sheet_name_in_filename": true,
+    "include_xml_inventory": true,
+    "generate_notebooklm_guide": true,
+    "notebooklm_guide_filename": "NOTEBOOKLM_TESTSAVVY_XML_JSON_ORDERING_GUIDE.md",
+    "notebooklm_enhanced_format": true,
+    "normalize_markdown_filenames": true,
+    "json_output_mode": "testsavvy_smart",
+    "include_json_inventory": true,
+    "json_inventory_max_rows": 5000,
+    "json_table_max_rows": 10000,
+    "process_zip_files": true
 }
