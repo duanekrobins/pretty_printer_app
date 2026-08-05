@@ -75,6 +75,7 @@ import fnmatch
 import json
 import re
 import io
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -106,6 +107,15 @@ class AppConfig:
     excel_max_cell_length: int
     excel_sheet_name_in_filename: bool
     include_xml_inventory: bool
+    generate_notebooklm_guide: bool
+    notebooklm_guide_filename: str
+    notebooklm_enhanced_format: bool
+    normalize_markdown_filenames: bool
+    json_output_mode: str
+    include_json_inventory: bool
+    json_inventory_max_rows: int
+    json_table_max_rows: int
+    process_zip_files: bool
 
 
 def _normalize_extension(ext: Optional[str]) -> Optional[str]:
@@ -141,9 +151,9 @@ def load_config(config_path: Path) -> AppConfig:
 
     output_dir = Path(raw.get("output_dir", "./output")).expanduser().resolve()
 
-    file_types_raw = raw.get("file_types", ["xml", "xlsx", "xlsm"])
+    file_types_raw = raw.get("file_types", ["xml", "json", "zip", "xlsx", "xlsm"])
     file_types = tuple(ft.lower().strip(".") for ft in file_types_raw)
-    allowed = {"json", "xml", "xlsx", "xlsm"}
+    allowed = {"json", "xml", "zip", "xlsx", "xlsm"}
     unknown = [ft for ft in file_types if ft not in allowed]
     if unknown:
         raise ValueError(f"Unknown file types in config: {unknown}. Allowed: {sorted(allowed)}")
@@ -177,6 +187,19 @@ def load_config(config_path: Path) -> AppConfig:
         raise ValueError("excel_markdown_mode currently supports only 'per_sheet'.")
 
     include_xml_inventory = bool(raw.get("include_xml_inventory", True))
+    generate_notebooklm_guide = bool(raw.get("generate_notebooklm_guide", True))
+    notebooklm_guide_filename = str(raw.get("notebooklm_guide_filename", "NOTEBOOKLM_TESTSAVVY_PAYLOAD_GUIDE.md"))
+    notebooklm_enhanced_format = bool(raw.get("notebooklm_enhanced_format", True))
+    normalize_markdown_filenames = bool(raw.get("normalize_markdown_filenames", True))
+
+    json_output_mode = str(raw.get("json_output_mode", "testsavvy_smart")).lower()
+    if json_output_mode not in {"testsavvy_smart", "raw_markdown"}:
+        raise ValueError("json_output_mode must be 'testsavvy_smart' or 'raw_markdown'.")
+
+    include_json_inventory = bool(raw.get("include_json_inventory", True))
+    json_inventory_max_rows = int(raw.get("json_inventory_max_rows", 5000))
+    json_table_max_rows = int(raw.get("json_table_max_rows", 2000))
+    process_zip_files = bool(raw.get("process_zip_files", True))
 
     return AppConfig(
         input_dirs=input_dirs,
@@ -199,6 +222,15 @@ def load_config(config_path: Path) -> AppConfig:
         excel_max_cell_length=int(raw.get("excel_max_cell_length", 500)),
         excel_sheet_name_in_filename=bool(raw.get("excel_sheet_name_in_filename", True)),
         include_xml_inventory=include_xml_inventory,
+        generate_notebooklm_guide=generate_notebooklm_guide,
+        notebooklm_guide_filename=notebooklm_guide_filename,
+        notebooklm_enhanced_format=notebooklm_enhanced_format,
+        normalize_markdown_filenames=normalize_markdown_filenames,
+        json_output_mode=json_output_mode,
+        include_json_inventory=include_json_inventory,
+        json_inventory_max_rows=json_inventory_max_rows,
+        json_table_max_rows=json_table_max_rows,
+        process_zip_files=process_zip_files,
     )
 
 
@@ -1055,6 +1087,1184 @@ def build_excel_combined_section(src: Path, sheet_name: str, content: str) -> st
 
 
 
+
+
+def key_value_table_markdown(title: str, values: Dict[str, str], max_value_len: int = 3000) -> List[str]:
+    """
+    Render a named key/value dictionary as a Markdown table with an explicit heading.
+    NotebookLM generally understands named tables better than unlabeled colon-only blocks.
+    """
+    lines = [title, "", "| Field | Value |", "| --- | --- |"]
+    for key, value in values.items():
+        if value not in (None, ""):
+            lines.append(f"| {markdown_escape(key, 500)} | {markdown_escape(value, max_value_len)} |")
+    lines.append("")
+    return lines
+
+# -----------------------------------------------------------------------------
+# TestSavvy JSON support
+# -----------------------------------------------------------------------------
+def safe_filename_component(value: object, max_len: int = 120) -> str:
+    """
+    Convert arbitrary text into a safe filename component that keeps underscores
+    and avoids spaces/special characters that can confuse ingestion tools.
+    """
+    text = "" if value is None else str(value)
+    text = re.sub(r"[^\w\-]+", "_", text.strip())
+    text = re.sub(r"_+", "_", text).strip("_")
+    if not text:
+        text = "unnamed"
+    return text[:max_len].strip("_") or "unnamed"
+
+
+def json_type_name(value: Any) -> str:
+    """
+    Return a compact JSON type name for inventory rows.
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    return "string"
+
+
+def compact_json_value(value: Any, max_len: int = 1000) -> str:
+    """
+    Render a JSON scalar or compact collection summary for Markdown tables.
+    """
+    if isinstance(value, dict):
+        return f"object with {len(value)} keys"
+    if isinstance(value, list):
+        return f"array with {len(value)} items"
+    if value is None:
+        return ""
+    text = str(value)
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
+    return text[:max_len - 3] + "..." if max_len > 0 and len(text) > max_len else text
+
+
+def json_inventory_rows(value: Any, path: str = "$", rows: Optional[List[Dict[str, str]]] = None, max_rows: int = 5000) -> List[Dict[str, str]]:
+    """
+    Flatten JSON into path/type/summary rows so NotebookLM can locate deeply nested values.
+    """
+    if rows is None:
+        rows = []
+    if len(rows) >= max_rows:
+        return rows
+
+    if isinstance(value, dict):
+        rows.append({
+            "Path": path,
+            "Type": "object",
+            "Summary": f"{len(value)} keys",
+            "Value": "",
+        })
+        for key, child in value.items():
+            child_path = f"{path}.{key}" if re.match(r"^[A-Za-z_]\w*$", str(key)) else f"{path}[{json.dumps(str(key))}]"
+            json_inventory_rows(child, child_path, rows, max_rows)
+            if len(rows) >= max_rows:
+                break
+    elif isinstance(value, list):
+        rows.append({
+            "Path": path,
+            "Type": "array",
+            "Summary": f"{len(value)} items",
+            "Value": "",
+        })
+        for idx, child in enumerate(value):
+            json_inventory_rows(child, f"{path}[{idx}]", rows, max_rows)
+            if len(rows) >= max_rows:
+                break
+    else:
+        rows.append({
+            "Path": path,
+            "Type": json_type_name(value),
+            "Summary": "",
+            "Value": compact_json_value(value, 2000),
+        })
+    return rows
+
+
+def json_inventory_markdown(data: Any, max_rows: int = 5000) -> List[str]:
+    """
+    Render a flattened JSON inventory as Markdown.
+    """
+    rows = json_inventory_rows(data, max_rows=max_rows)
+    lines = [
+        "## JSON Inventory",
+        "",
+        "This flattened inventory is the fallback source of truth for deeply nested JSON values not shown in the semantic sections above.",
+        "",
+        "| JSON Path | Type | Summary | Value |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {markdown_escape(row['Path'], 2000)} | {markdown_escape(row['Type'], 100)} | "
+            f"{markdown_escape(row['Summary'], 500)} | {markdown_escape(row['Value'], 4000)} |"
+        )
+    if len(rows) >= max_rows:
+        lines.append(f"| INVENTORY_TRUNCATED | notice | Reached configured json_inventory_max_rows={max_rows} | Increase json_inventory_max_rows to include more rows. |")
+    lines.append("")
+    return lines
+
+
+def detect_testsavvy_json_kind(data: Any) -> str:
+    """
+    Detect known TestSavvy JSON export shapes.
+    """
+    if isinstance(data, dict) and isinstance(data.get("automationSequence"), dict) and isinstance(data.get("sequenceList"), list):
+        return "test_case"
+    if isinstance(data, dict) and isinstance(data.get("export"), dict) and "interfaceMapName" in data.get("export", {}):
+        return "interface_repository"
+    if isinstance(data, list):
+        return "test_case_group"
+    return "generic"
+
+
+def testsavvy_json_output_filename(data: Any, source_name: str, fallback_index: Optional[int] = None) -> str:
+    """
+    Build NotebookLM-friendly Markdown filenames for JSON exports.
+    """
+    kind = detect_testsavvy_json_kind(data)
+    suffix = "" if fallback_index is None else f"_{fallback_index:04d}"
+
+    if kind == "test_case":
+        auto = data.get("automationSequence", {})
+        tc_id = auto.get("id") or "unknown"
+        return f"TC_{safe_filename_component(tc_id)}{suffix}.md"
+
+    if kind == "interface_repository":
+        export = data.get("export", {})
+        name = export.get("interfaceMapName") or export.get("interfaceElementName") or "interface"
+        return f"IR_{safe_filename_component(name)}{suffix}.md"
+
+    if kind == "test_case_group":
+        stem = safe_filename_component(Path(source_name).stem, 80)
+        return f"GROUP_{stem}{suffix}.md"
+
+    stem = safe_filename_component(Path(source_name).stem, 120)
+    if "_" not in stem:
+        stem = f"JSON_{stem}"
+    return f"{stem}{suffix}.md"
+
+
+# -----------------------------------------------------------------------------
+# TestSavvy JSON execution-order helpers
+# -----------------------------------------------------------------------------
+def coerce_sequence(value: Any, fallback: int = 999999) -> int:
+    """
+    Convert TestSavvy sequence-like values to integers for stable ordering.
+    Missing, blank, or non-numeric values sort after real sequence numbers.
+    """
+    if value is None or value == "":
+        return fallback
+    try:
+        return int(value)
+    except Exception:
+        try:
+            return int(float(str(value)))
+        except Exception:
+            return fallback
+
+
+def flag_is_not_false(value: Any) -> bool:
+    """
+    Treat missing/null as active unless TestSavvy explicitly exports false/0/no.
+    This prevents reusable scenarios with omitted flags from being incorrectly marked excluded.
+    """
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"false", "0", "no", "n", "excluded", "inactive"}:
+        return False
+    return True
+
+
+def flag_label(value: Any) -> str:
+    """
+    Render a TestSavvy status/include flag in human-friendly form.
+    """
+    return "Yes" if flag_is_not_false(value) else "No"
+
+
+def scenario_sequence_value(scenario: Dict[str, Any], fallback: int) -> int:
+    """
+    Return the scenario sequence TestSavvy uses for authored/runtime order.
+    `sequence` is preferred; `original_sequence` is the fallback.
+    """
+    if scenario.get("sequence") not in (None, ""):
+        return coerce_sequence(scenario.get("sequence"), fallback)
+    return coerce_sequence(scenario.get("original_sequence"), fallback)
+
+
+def step_sequence_value(step: Dict[str, Any], fallback: int) -> int:
+    """
+    Return the step sequence inside a scenario.
+    """
+    return coerce_sequence(step.get("sequence"), fallback)
+
+
+def scenario_is_executable(scenario: Dict[str, Any]) -> bool:
+    """
+    A JSON scenario is runtime-equivalent only when status and include_status are not false.
+    """
+    return flag_is_not_false(scenario.get("status")) and flag_is_not_false(scenario.get("include_status"))
+
+
+def step_is_executable(step: Dict[str, Any]) -> bool:
+    """
+    A JSON step is runtime-equivalent only when step status/include_status and stepAssociation.status are not false.
+    """
+    assoc = step.get("stepAssociation") or {}
+    return (
+        flag_is_not_false(step.get("status"))
+        and flag_is_not_false(step.get("include_status"))
+        and flag_is_not_false(assoc.get("status"))
+    )
+
+
+def scenario_exclusion_reason(scenario: Dict[str, Any]) -> str:
+    """
+    Explain why a scenario is not expected to execute.
+    """
+    reasons: List[str] = []
+    if not flag_is_not_false(scenario.get("status")):
+        reasons.append("scenario.status=false")
+    if not flag_is_not_false(scenario.get("include_status")):
+        reasons.append("scenario.include_status=false")
+    return "; ".join(reasons)
+
+
+def step_exclusion_reason(step: Dict[str, Any], scenario: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Explain why a step is not expected to execute.
+    """
+    reasons: List[str] = []
+    if scenario is not None:
+        scen_reason = scenario_exclusion_reason(scenario)
+        if scen_reason:
+            reasons.append(scen_reason)
+    if not flag_is_not_false(step.get("status")):
+        reasons.append("step.status=false")
+    if not flag_is_not_false(step.get("include_status")):
+        reasons.append("step.include_status=false")
+    assoc = step.get("stepAssociation") or {}
+    if not flag_is_not_false(assoc.get("status")):
+        reasons.append("stepAssociation.status=false")
+    return "; ".join(reasons)
+
+
+def sorted_scenario_records(scenarios: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Return scenario records with raw JSON index, runtime sequence, and execution classification.
+    The raw JSON array order is NOT treated as execution order.
+    """
+    records: List[Dict[str, Any]] = []
+    for raw_idx, scenario in enumerate(scenarios):
+        seq = scenario_sequence_value(scenario, raw_idx + 1)
+        active = scenario_is_executable(scenario)
+        records.append({
+            "raw_index": raw_idx,
+            "runtime_sequence": seq,
+            "scenario": scenario,
+            "active": active,
+            "exclusion_reason": scenario_exclusion_reason(scenario),
+        })
+    return sorted(records, key=lambda r: (r["runtime_sequence"], r["raw_index"]))
+
+
+def sorted_steps_for_scenario(scenario: Dict[str, Any]) -> List[Tuple[int, Dict[str, Any]]]:
+    """
+    Sort a scenario's steps by TestSavvy step sequence rather than JSON array order.
+    """
+    steps = scenario.get("scenarioFlowList") or []
+    indexed = []
+    for raw_idx, step in enumerate(steps):
+        indexed.append((raw_idx, step_sequence_value(step, raw_idx), step))
+    indexed.sort(key=lambda item: (item[1], item[0]))
+    return [(raw_idx, step) for raw_idx, _seq, step in indexed]
+
+
+def format_json_location(raw_scenario_index: int, raw_step_index: Optional[int] = None) -> str:
+    """
+    Build a JSON path back to the raw exported file.
+    """
+    base = f"$.sequenceList[{raw_scenario_index}]"
+    if raw_step_index is None:
+        return base
+    return f"{base}.scenarioFlowList[{raw_step_index}]"
+
+
+def testsavvy_testcase_step_rows(
+    scenario: Dict[str, Any],
+    scenario_active: bool = True,
+    raw_scenario_index: int = 0,
+) -> List[Dict[str, str]]:
+    """
+    Extract step rows from a TestSavvy test-case JSON scenarioFlowList.
+    Steps are sorted by step.sequence and include active/excluded execution status.
+    """
+    rows: List[Dict[str, str]] = []
+    for display_idx, (raw_step_idx, step) in enumerate(sorted_steps_for_scenario(scenario), start=1):
+        assoc = step.get("stepAssociation") or {}
+        is_active = scenario_active and step_is_executable(step)
+        reason = "" if is_active else step_exclusion_reason(step, scenario)
+        rows.append({
+            "Runtime Step Order": str(display_idx),
+            "Step Sequence": str(step_sequence_value(step, raw_step_idx)),
+            "Execution Status": "Active / Executable" if is_active else "Excluded / Not Executed",
+            "Exclusion Reason": reason,
+            "Step Name": step.get("name", ""),
+            "Action": step.get("action_name", ""),
+            "Type": step.get("action_type", ""),
+            "Classification": step.get("action_classification", ""),
+            "English Text": step.get("english_text", ""),
+            "Element Logical Name": step.get("element_logical_name", ""),
+            "Element Type": step.get("element_type", ""),
+            "Dataset": assoc.get("dataset_name", ""),
+            "Dataset Header": step.get("dataset_header_name", "") or assoc.get("dataset_header_name", ""),
+            "Value": assoc.get("value", ""),
+            "Encrypted": "Yes" if assoc.get("encrypt_data") else "No",
+            "Tool": step.get("auto_profile_name", "") or step.get("test_engine_name", ""),
+            "Requires Data": "Yes" if step.get("requires_data") else "No",
+            "Uses Override": "Yes" if step.get("uses_override") or assoc.get("uses_override") else "No",
+            "SQL Command": step.get("sql_command", ""),
+            "Action Code": step.get("action_code", ""),
+            "JSON Location": format_json_location(raw_scenario_index, raw_step_idx),
+            "Raw Step JSON": json.dumps(step, ensure_ascii=False, sort_keys=True)[:8000],
+        })
+    return rows
+
+
+def render_scenario_index_table(title: str, records: List[Dict[str, Any]], note: str = "") -> List[str]:
+    """
+    Render an execution-aware scenario index.
+    """
+    lines = [title, ""]
+    if note:
+        lines.extend([note, ""])
+    lines.append("| Runtime Order | Scenario Sequence | Scenario Name | Logical Name | Scenario Type | Reusable | Status | Include Status | Execution Status | Exclusion Reason | Comment | Step Count | JSON Location |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for runtime_order, record in enumerate(records, start=1):
+        scenario = record["scenario"]
+        active = record["active"]
+        lines.append(
+            f"| {runtime_order} | {record['runtime_sequence']} | "
+            f"{markdown_escape(scenario.get('name', ''), 1000)} | "
+            f"{markdown_escape(scenario.get('logical_name', ''), 1000)} | "
+            f"{markdown_escape(scenario.get('scenario_type', ''), 500)} | "
+            f"{flag_label(scenario.get('reusable'))} | "
+            f"{flag_label(scenario.get('status'))} | "
+            f"{flag_label(scenario.get('include_status'))} | "
+            f"{'Active / Executable' if active else 'Excluded / Not Executed'} | "
+            f"{markdown_escape(record.get('exclusion_reason', ''), 1500)} | "
+            f"{markdown_escape(scenario.get('comment_field', ''), 1000)} | "
+            f"{len(scenario.get('scenarioFlowList') or [])} | `{format_json_location(record['raw_index'])}` |"
+        )
+    if not records:
+        lines.append("|  |  |  |  |  |  |  |  |  |  |  | 0 |  |")
+    lines.append("")
+    return lines
+
+
+def submit_like_step(step: Dict[str, Any]) -> bool:
+    """
+    Return True for actual Submit button/action references, not verification text such as
+    "Transaction submitted successfully".
+    """
+    action_name = str(step.get("action_name") or "").strip().lower()
+    step_name = str(step.get("name") or "").strip().lower()
+    logical_name = str(step.get("element_logical_name") or "").strip().lower()
+    element_type = str(step.get("element_type") or "").strip().lower()
+    action_code = str(step.get("action_code") or "").lower()
+
+    if "viewactions.submit" in action_code:
+        return True
+    if action_name == "click" and logical_name == "submit":
+        return True
+    if action_name == "click" and step_name.endswith("~ submit"):
+        return True
+    if logical_name == "submit" and element_type in {"button", "menu item", "link"}:
+        return True
+    return False
+
+
+def render_submit_execution_index(records: List[Dict[str, Any]]) -> List[str]:
+    """
+    Build active/excluded Submit index so NotebookLM can answer coverage questions correctly.
+    """
+    lines = [
+        "## Submit Button Execution Index",
+        "",
+        "Use this section for questions such as `Which TestSavvy automated test cases actively click Submit?`. Count only rows where Execution Status is `Active / Executable` unless the question explicitly asks for excluded/inactive steps.",
+        "",
+        "| Runtime Scenario Order | Scenario Sequence | Step Sequence | Execution Status | Exclusion Reason | Scenario Name | Step Name | Element Logical Name | Element Type | Action Code | JSON Location |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    found = 0
+    for runtime_order, record in enumerate(records, start=1):
+        scenario = record["scenario"]
+        scenario_active = record["active"]
+        for raw_step_idx, step in sorted_steps_for_scenario(scenario):
+            if not submit_like_step(step):
+                continue
+            found += 1
+            active = scenario_active and step_is_executable(step)
+            lines.append(
+                f"| {runtime_order} | {record['runtime_sequence']} | {step_sequence_value(step, raw_step_idx)} | "
+                f"{'Active / Executable' if active else 'Excluded / Not Executed'} | "
+                f"{markdown_escape('' if active else step_exclusion_reason(step, scenario), 1500)} | "
+                f"{markdown_escape(scenario.get('name', ''), 1000)} | "
+                f"{markdown_escape(step.get('name', ''), 1000)} | "
+                f"{markdown_escape(step.get('element_logical_name', ''), 1000)} | "
+                f"{markdown_escape(step.get('element_type', ''), 500)} | "
+                f"{markdown_escape(step.get('action_code', ''), 5000)} | `{format_json_location(record['raw_index'], raw_step_idx)}` |"
+            )
+    if not found:
+        lines.append("|  |  |  |  |  |  |  |  |  |  |  |")
+    lines.append("")
+    return lines
+
+
+def testsavvy_testcase_json_markdown(source_name: str, data: Dict[str, Any], cfg: AppConfig) -> str:
+    """
+    Convert a TestSavvy test-case JSON export into NotebookLM-oriented Markdown.
+    IMPORTANT: sequenceList array order is not execution order. Scenarios are sorted by sequence/original_sequence.
+    """
+    auto = data.get("automationSequence", {}) or {}
+    scenarios = data.get("sequenceList", []) or []
+    records = sorted_scenario_records(scenarios)
+    active_records = [r for r in records if r["active"]]
+    excluded_records = [r for r in records if not r["active"]]
+
+    lines: List[str] = []
+    title_id = auto.get("id", "")
+    title_name = auto.get("name", Path(source_name).stem)
+
+    lines.append(f"# TestSavvy Test Case JSON Payload: {markdown_escape(title_id, 500)} - {markdown_escape(title_name, 1000)}")
+    lines.append("")
+    lines.append("## Document Identity")
+    lines.append("")
+    lines.append("| Field | Value |")
+    lines.append("| --- | --- |")
+    lines.append(f"| Source File | {markdown_escape(source_name, 500)} |")
+    lines.append(f"| JSON Export Type | TestSavvy Test Case Export |")
+    lines.append(f"| Test Case ID | {markdown_escape(auto.get('id', ''), 500)} |")
+    lines.append(f"| Test Case Name | {markdown_escape(auto.get('name', ''), 1000)} |")
+    lines.append(f"| Raw JSON Scenario Count | {len(scenarios)} |")
+    lines.append(f"| Active Runtime-Equivalent Scenario Count | {len(active_records)} |")
+    lines.append(f"| Excluded / Inactive Scenario Count | {len(excluded_records)} |")
+    lines.append("")
+
+    lines.append("## Critical Ordering Rule")
+    lines.append("")
+    lines.append("The exported JSON `sequenceList[]` array order is not reliable execution order. This Markdown file sorts scenarios by `scenario.sequence`, falling back to `scenario.original_sequence`, and preserves raw JSON location separately. Use `Active Runtime-Equivalent Scenario Index` for what the test is expected to execute. Use `Full Raw JSON Scenario Inventory` only for debugging the export file.")
+    lines.append("")
+
+    summary_keys = [
+        "id", "name", "description", "created_by_id", "last_modified_by_id", "project_id",
+        "automation_sequence_test_case_status_id", "case_group_ind", "debug", "continue_on_fail",
+        "contains_holds", "displayStepNum", "deleted"
+    ]
+    lines.append("## Test Case Summary")
+    lines.append("")
+    lines.append("| Field | Value | JSON Location |")
+    lines.append("| --- | --- | --- |")
+    for key in summary_keys:
+        if key in auto:
+            lines.append(f"| {markdown_escape(key, 500)} | {markdown_escape(compact_json_value(auto.get(key), 3000), 3000)} | `$.automationSequence.{markdown_escape(key, 300)}` |")
+    lines.append("")
+
+    lines.append("## NotebookLM JSON Field Map")
+    lines.append("")
+    lines.append("| Business Term | JSON Location | Markdown Location | Meaning |")
+    lines.append("| --- | --- | --- | --- |")
+    field_rows = [
+        ("Test Case ID", "$.automationSequence.id", "## Document Identity; ## Test Case Summary", "The TestSavvy test case / automation sequence identifier."),
+        ("Test Case Name", "$.automationSequence.name", "Document title; ## Document Identity; ## Test Case Summary", "Human-readable name of the TestSavvy test case."),
+        ("Raw Scenario List", "$.sequenceList[]", "## Full Raw JSON Scenario Inventory", "The exported JSON array. This is not necessarily execution order."),
+        ("Execution Scenario Order", "$.sequenceList[].sequence", "## Active Runtime-Equivalent Scenario Index", "Primary scenario ordering field for the authored/runtime-equivalent flow."),
+        ("Fallback Scenario Order", "$.sequenceList[].original_sequence", "## Active Runtime-Equivalent Scenario Index", "Fallback ordering field when sequence is missing."),
+        ("Scenario Include Status", "$.sequenceList[].include_status", "All scenario indexes", "False means the scenario exists in JSON but should not be counted as executed coverage."),
+        ("Scenario Status", "$.sequenceList[].status", "All scenario indexes", "False means the scenario is inactive."),
+        ("Scenario Steps", "$.sequenceList[].scenarioFlowList[]", "Scenario step detail tables", "Step/action definitions inside each scenario, sorted by step.sequence."),
+        ("Step Include Status", "$.sequenceList[].scenarioFlowList[].include_status", "Scenario step detail tables column Execution Status", "False means the step exists in JSON but is excluded."),
+        ("Step Dataset Value", "$.sequenceList[].scenarioFlowList[].stepAssociation.value", "Scenario step detail tables column Value", "Data entered, selected, clicked, or used by the step."),
+        ("Step Action Code", "$.sequenceList[].scenarioFlowList[].action_code", "Scenario step detail tables column Action Code", "Executable WebDriver/Selenium/custom automation code."),
+    ]
+    for term, jloc, mdloc, meaning in field_rows:
+        lines.append(f"| {term} | `{jloc}` | {mdloc} | {meaning} |")
+    lines.append("")
+
+    lines.extend(render_scenario_index_table(
+        "## Active Runtime-Equivalent Scenario Index",
+        active_records,
+        "This is the primary flow NotebookLM should use for questions about what the test does. It is sorted by `sequence`/`original_sequence` and excludes inactive scenarios.",
+    ))
+    lines.extend(render_scenario_index_table(
+        "## Excluded / Inactive Scenario Index",
+        excluded_records,
+        "These scenarios exist in the JSON export but should not be counted as executed coverage unless the user explicitly asks about excluded/inactive scenarios.",
+    ))
+
+    lines.append("## Full Raw JSON Scenario Inventory")
+    lines.append("")
+    lines.append("This section preserves the physical JSON array order for debugging only. Do not use it as execution order.")
+    lines.append("")
+    lines.append("| Raw JSON Array Position | Scenario Sequence | Scenario Name | Include Status | Status | Comment | JSON Location |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for raw_idx, scenario in enumerate(scenarios):
+        lines.append(
+            f"| {raw_idx + 1} | {scenario_sequence_value(scenario, raw_idx + 1)} | "
+            f"{markdown_escape(scenario.get('name', ''), 1000)} | "
+            f"{flag_label(scenario.get('include_status'))} | "
+            f"{flag_label(scenario.get('status'))} | "
+            f"{markdown_escape(scenario.get('comment_field', ''), 1000)} | `{format_json_location(raw_idx)}` |"
+        )
+    lines.append("")
+
+    lines.extend(render_submit_execution_index(records))
+
+    custom_functions = []
+    selector_rows = []
+    for runtime_order, record in enumerate(records, start=1):
+        scenario = record["scenario"]
+        scenario_active = record["active"]
+        for raw_step_idx, step in sorted_steps_for_scenario(scenario):
+            assoc = step.get("stepAssociation") or {}
+            value = str(assoc.get("value") or "")
+            action_code = str(step.get("action_code") or "")
+            active = scenario_active and step_is_executable(step)
+            status_text = "Active / Executable" if active else "Excluded / Not Executed"
+            if "@" in value or "@" in action_code or str(step.get("action_name", "")).lower() == "custom function":
+                custom_functions.append((runtime_order, record["runtime_sequence"], status_text, scenario.get("name", ""), step.get("name", ""), value, action_code, format_json_location(record["raw_index"], raw_step_idx)))
+            if any(token in action_code for token in ["xpath", "data-qa", "aria-label", "find_element", "contains(@"]):
+                selector_rows.append((runtime_order, record["runtime_sequence"], status_text, scenario.get("name", ""), step.get("name", ""), step.get("element_logical_name", ""), step.get("element_type", ""), action_code, format_json_location(record["raw_index"], raw_step_idx)))
+
+    lines.append("## Custom Functions and Dynamic Values")
+    lines.append("")
+    lines.append("| Runtime Scenario Order | Scenario Sequence | Execution Status | Scenario | Step | Value | Action Code | JSON Location |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    for row in custom_functions[:cfg.json_table_max_rows]:
+        *cells, json_loc = row
+        lines.append("| " + " | ".join(markdown_escape(x, 4000) for x in cells) + f" | `{json_loc}` |")
+    if not custom_functions:
+        lines.append("|  |  |  |  |  |  |  |  |")
+    lines.append("")
+
+    lines.append("## Selector / Action Code Index")
+    lines.append("")
+    lines.append("Use this table to review XPath, `data-qa`, `data-qa-id`, `aria-label`, and other locator logic. Execution Status tells whether the selector is part of the active runtime-equivalent flow.")
+    lines.append("")
+    lines.append("| Runtime Scenario Order | Scenario Sequence | Execution Status | Scenario | Step | Element Logical Name | Element Type | Action Code | JSON Location |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for row in selector_rows[:cfg.json_table_max_rows]:
+        *cells, json_loc = row
+        lines.append("| " + " | ".join(markdown_escape(x, 5000) for x in cells) + f" | `{json_loc}` |")
+    if not selector_rows:
+        lines.append("|  |  |  |  |  |  |  |  |  |")
+    lines.append("")
+
+    def render_scenario_details(section_title: str, detail_records: List[Dict[str, Any]], include_notice: str) -> None:
+        lines.append(section_title)
+        lines.append("")
+        lines.append(include_notice)
+        lines.append("")
+        for runtime_order, record in enumerate(detail_records, start=1):
+            scenario = record["scenario"]
+            lines.append(f"### Scenario {runtime_order}: {markdown_escape(scenario.get('name', ''), 1000)}")
+            lines.append("")
+            meta = {
+                "Runtime Scenario Order": runtime_order,
+                "Scenario Sequence": record["runtime_sequence"],
+                "Execution Status": "Active / Executable" if record["active"] else "Excluded / Not Executed",
+                "Exclusion Reason": record.get("exclusion_reason", ""),
+                "Logical Name": scenario.get("logical_name", ""),
+                "Scenario Type": scenario.get("scenario_type", ""),
+                "Reusable": flag_label(scenario.get("reusable")),
+                "Status": flag_label(scenario.get("status")),
+                "Include Status": flag_label(scenario.get("include_status")),
+                "Raw Sequence": scenario.get("sequence", ""),
+                "Original Sequence": scenario.get("original_sequence", ""),
+                "Comment": scenario.get("comment_field", ""),
+                "Dataset Type": scenario.get("dataset_type", ""),
+                "Dataset Name": scenario.get("dataset_name", ""),
+                "Step Count": len(scenario.get("scenarioFlowList") or []),
+                "JSON Location": format_json_location(record["raw_index"]),
+            }
+            lines.extend(key_value_table_markdown("#### Scenario Metadata", {k: str(v) for k, v in meta.items()}))
+            step_rows = testsavvy_testcase_step_rows(scenario, record["active"], record["raw_index"])
+            header = [
+                "Runtime Step Order", "Step Sequence", "Execution Status", "Exclusion Reason",
+                "Step Name", "Action", "Type", "Classification", "English Text",
+                "Element Logical Name", "Element Type", "Dataset", "Dataset Header", "Value",
+                "Encrypted", "Tool", "Requires Data", "Uses Override", "SQL Command", "Action Code", "JSON Location", "Raw Step JSON"
+            ]
+            lines.append("#### Scenario Step Details")
+            lines.append("")
+            lines.append("| " + " | ".join(header) + " |")
+            lines.append("| " + " | ".join(["---"] * len(header)) + " |")
+            for step_row in step_rows:
+                cells = []
+                for col in header:
+                    val = step_row.get(col, "")
+                    if col == "JSON Location":
+                        cells.append(f"`{markdown_escape(val, 1000)}`")
+                    else:
+                        cells.append(markdown_escape(val, 8000))
+                lines.append("| " + " | ".join(cells) + " |")
+            if not step_rows:
+                lines.append("| " + " | ".join([""] * len(header)) + " |")
+            lines.append("")
+
+    render_scenario_details(
+        "## Active Runtime-Equivalent Scenarios and Steps",
+        active_records,
+        "These scenarios and steps are sorted by runtime-equivalent sequence and should be used to understand what the TestSavvy test case actually does.",
+    )
+    render_scenario_details(
+        "## Excluded / Inactive Scenarios and Steps",
+        excluded_records,
+        "These scenarios and steps exist in the JSON export but are not expected to execute. They are useful for troubleshooting design drift and disabled coverage.",
+    )
+
+    if cfg.include_json_inventory:
+        lines.extend(json_inventory_markdown(data, cfg.json_inventory_max_rows))
+
+    return "\n".join(lines)
+
+def flatten_interface_elements(node: Dict[str, Any], rows: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    """
+    Flatten a TestSavvy interface repository tree.
+    """
+    if rows is None:
+        rows = []
+    actions = node.get("actions") or []
+    children = node.get("children") or []
+    rows.append({
+        "Interface Map": node.get("interfaceMapName", ""),
+        "Element Name": node.get("interfaceElementName", ""),
+        "Text Path": node.get("textPath", ""),
+        "ID Path": node.get("idPath", ""),
+        "Depth": node.get("depth", ""),
+        "Sequence": node.get("sequence", ""),
+        "Interface Type": node.get("interfaceType", ""),
+        "Element Type": node.get("interfaceElementTypeName", ""),
+        "Default Enter Action": node.get("defaultEnterActionName", ""),
+        "Default Verify Action": node.get("defaultVerifyActionName", ""),
+        "Override": normalize_bool_text(str(node.get("overrideFlag", ""))),
+        "Sync Properties": normalize_bool_text(str(node.get("syncProperties", ""))),
+        "Encrypt Data": normalize_bool_text(str(node.get("encryptData", ""))),
+        "Template": node.get("templateName", ""),
+        "Automation Profile": node.get("automationProfileName", ""),
+        "Import Export Key": node.get("importExportKey", ""),
+        "Action Count": len(actions),
+        "Child Count": len(children),
+        "actions": actions,
+    })
+    for child in children:
+        if isinstance(child, dict):
+            flatten_interface_elements(child, rows)
+    return rows
+
+
+def testsavvy_interface_json_markdown(source_name: str, data: Dict[str, Any], cfg: AppConfig) -> str:
+    """
+    Convert a TestSavvy interface repository JSON export into NotebookLM-oriented Markdown.
+    """
+    export = data.get("export", {}) or {}
+    rows = flatten_interface_elements(export)
+
+    lines: List[str] = []
+    map_name = export.get("interfaceMapName") or export.get("interfaceElementName") or Path(source_name).stem
+    lines.append(f"# TestSavvy Interface Repository JSON Payload: {markdown_escape(map_name, 1000)}")
+    lines.append("")
+    lines.append("## Document Identity")
+    lines.append("")
+    lines.append("| Field | Value |")
+    lines.append("| --- | --- |")
+    lines.append(f"| Source File | {markdown_escape(source_name, 500)} |")
+    lines.append("| JSON Export Type | TestSavvy Interface Repository Export |")
+    lines.append(f"| Machine Name | {markdown_escape(data.get('machineName', ''), 500)} |")
+    lines.append(f"| Client Name | {markdown_escape(data.get('clientName', ''), 500)} |")
+    lines.append(f"| Interface Map Name | {markdown_escape(map_name, 500)} |")
+    lines.append(f"| Interface Element Count | {len(rows)} |")
+    lines.append("")
+
+    lines.append("## NotebookLM JSON Field Map")
+    lines.append("")
+    lines.append("| Business Term | JSON Location | Markdown Location | Meaning |")
+    lines.append("| --- | --- | --- | --- |")
+    field_rows = [
+        ("Interface Map Name", "$.export.interfaceMapName", "## Document Identity; ## Interface Root Summary", "Top-level interface map, such as FIN."),
+        ("Interface Element Name", "$.export.children[].interfaceElementName", "## Interface Element Index", "Human-readable UI element name."),
+        ("Text Path", "$.export.children[].textPath", "## Interface Element Index", "Full logical tree path to the UI element."),
+        ("ID Path", "$.export.children[].idPath", "## Interface Element Index", "Internal TestSavvy path/id chain."),
+        ("Actions", "$.export.children[].actions[]", "## Interface Actions and Properties", "Available enter/verify/click action definitions."),
+        ("Selector Properties", "$.export.children[].actions[].properties[]", "## Selector Property Index", "Locator properties such as xpath, id, name, aria-label, data-qa, data-qa-id."),
+    ]
+    for term, jloc, mdloc, meaning in field_rows:
+        lines.append(f"| {term} | `{jloc}` | {mdloc} | {meaning} |")
+    lines.append("")
+
+    root_summary = {k: compact_json_value(v, 1000) for k, v in export.items() if k not in {"children", "actions"}}
+    lines.extend(key_value_table_markdown("## Interface Root Summary", root_summary))
+
+    lines.append("## Interface Element Index")
+    lines.append("")
+    lines.append("| # | Text Path | Element Name | ID Path | Depth | Type | Default Enter | Default Verify | Actions | Children | Sync Properties | Encrypt Data |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for idx, row in enumerate(rows[:cfg.json_table_max_rows], start=1):
+        lines.append(
+            f"| {idx} | {markdown_escape(row.get('Text Path', ''), 2000)} | "
+            f"{markdown_escape(row.get('Element Name', ''), 1000)} | "
+            f"{markdown_escape(row.get('ID Path', ''), 1000)} | "
+            f"{markdown_escape(row.get('Depth', ''), 100)} | "
+            f"{markdown_escape(row.get('Element Type', ''), 500)} | "
+            f"{markdown_escape(row.get('Default Enter Action', ''), 500)} | "
+            f"{markdown_escape(row.get('Default Verify Action', ''), 500)} | "
+            f"{markdown_escape(row.get('Action Count', ''), 50)} | "
+            f"{markdown_escape(row.get('Child Count', ''), 50)} | "
+            f"{markdown_escape(row.get('Sync Properties', ''), 100)} | "
+            f"{markdown_escape(row.get('Encrypt Data', ''), 100)} |"
+        )
+    if len(rows) > cfg.json_table_max_rows:
+        lines.append(f"| TRUNCATED | Increase json_table_max_rows to include all {len(rows)} interface elements. |  |  |  |  |  |  |  |  |  |  |")
+    lines.append("")
+
+    action_rows = []
+    selector_rows = []
+    selector_names = {"xpath", "id", "name", "aria-label", "data-qa", "data-qa-id", "css", "class", "text"}
+    for row in rows:
+        for action in row.get("actions") or []:
+            props = action.get("properties") or []
+            prop_text = "; ".join(f"{p.get('propertyName')}={p.get('propertyValue')}" for p in props)
+            action_rows.append((row.get("Text Path", ""), row.get("Element Name", ""), action.get("actionName", ""), action.get("stepDefinitionActionId", ""), prop_text))
+            selected = []
+            for p in props:
+                pname = str(p.get("propertyName") or "")
+                pval = p.get("propertyValue")
+                if pname.lower() in selector_names or pval:
+                    selected.append(f"{pname}={pval}")
+            if selected:
+                selector_rows.append((row.get("Text Path", ""), row.get("Element Name", ""), action.get("actionName", ""), "; ".join(selected)))
+
+    lines.append("## Interface Actions and Properties")
+    lines.append("")
+    lines.append("| Text Path | Element Name | Action | Step Definition Action ID | Properties |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for row in action_rows[:cfg.json_table_max_rows]:
+        lines.append("| " + " | ".join(markdown_escape(x, 5000) for x in row) + " |")
+    if not action_rows:
+        lines.append("|  |  |  |  |  |")
+    if len(action_rows) > cfg.json_table_max_rows:
+        lines.append(f"| TRUNCATED | Increase json_table_max_rows to include all {len(action_rows)} actions. |  |  |  |")
+    lines.append("")
+
+    lines.append("## Selector Property Index")
+    lines.append("")
+    lines.append("Use this section to analyze locator stability, dynamic `data-qa-id`, XPath, IDs, names, and aria-labels.")
+    lines.append("")
+    lines.append("| Text Path | Element Name | Action | Selector / Property Values |")
+    lines.append("| --- | --- | --- | --- |")
+    for row in selector_rows[:cfg.json_table_max_rows]:
+        lines.append("| " + " | ".join(markdown_escape(x, 5000) for x in row) + " |")
+    if not selector_rows:
+        lines.append("|  |  |  |  |")
+    if len(selector_rows) > cfg.json_table_max_rows:
+        lines.append(f"| TRUNCATED | Increase json_table_max_rows to include all {len(selector_rows)} selector rows. |  |  |")
+    lines.append("")
+
+    if cfg.include_json_inventory:
+        lines.extend(json_inventory_markdown(data, cfg.json_inventory_max_rows))
+
+    return "\n".join(lines)
+
+
+def testsavvy_group_json_markdown(source_name: str, data: List[Any], cfg: AppConfig) -> str:
+    """
+    Render group JSON exports or other top-level JSON arrays.
+    """
+    lines = [
+        f"# TestSavvy JSON Array Payload: {markdown_escape(Path(source_name).stem, 1000)}",
+        "",
+        "## Document Identity",
+        "",
+        "| Field | Value |",
+        "| --- | --- |",
+        f"| Source File | {markdown_escape(source_name, 500)} |",
+        "| JSON Export Type | Top-Level Array / Group Export |",
+        f"| Item Count | {len(data)} |",
+        "",
+        "## Array Item Summary",
+        "",
+        "| Index | Type | Summary |",
+        "| --- | --- | --- |",
+    ]
+    for idx, item in enumerate(data[:cfg.json_table_max_rows]):
+        lines.append(f"| {idx} | {json_type_name(item)} | {markdown_escape(compact_json_value(item, 3000), 3000)} |")
+    if len(data) > cfg.json_table_max_rows:
+        lines.append(f"| TRUNCATED | notice | Increase json_table_max_rows to include all {len(data)} rows. |")
+    lines.append("")
+    if cfg.include_json_inventory:
+        lines.extend(json_inventory_markdown(data, cfg.json_inventory_max_rows))
+    return "\n".join(lines)
+
+
+def json_to_markdown_from_data(source_name: str, data: Any, cfg: AppConfig) -> str:
+    """
+    Dispatch JSON conversion based on known TestSavvy JSON export shape.
+    """
+    if cfg.json_output_mode == "raw_markdown":
+        pretty = json.dumps(data, indent=cfg.indent, ensure_ascii=False, sort_keys=cfg.json_sort_keys)
+        return f"# Pretty Printed JSON\n\n**Source file:** `{source_name}`\n\n```json\n{pretty.rstrip()}\n```\n"
+
+    kind = detect_testsavvy_json_kind(data)
+    if kind == "test_case":
+        return testsavvy_testcase_json_markdown(source_name, data, cfg)
+    if kind == "interface_repository":
+        return testsavvy_interface_json_markdown(source_name, data, cfg)
+    if kind == "test_case_group":
+        return testsavvy_group_json_markdown(source_name, data, cfg)
+
+    lines = [
+        f"# Generic JSON Payload: {markdown_escape(Path(source_name).stem, 1000)}",
+        "",
+        "## Document Identity",
+        "",
+        "| Field | Value |",
+        "| --- | --- |",
+        f"| Source File | {markdown_escape(source_name, 500)} |",
+        "| JSON Export Type | Generic JSON |",
+        f"| Top-Level Type | {json_type_name(data)} |",
+        "",
+    ]
+    if cfg.include_json_inventory:
+        lines.extend(json_inventory_markdown(data, cfg.json_inventory_max_rows))
+    else:
+        pretty = json.dumps(data, indent=cfg.indent, ensure_ascii=False, sort_keys=cfg.json_sort_keys)
+        lines.extend(["## Pretty Printed JSON", "", "```json", pretty.rstrip(), "```", ""])
+    return "\n".join(lines)
+
+
+def json_to_markdown(src: Path, cfg: AppConfig) -> str:
+    """
+    Load a JSON source file and convert it into Markdown.
+    """
+    data = json.loads(src.read_text(encoding="utf-8-sig"))
+    return json_to_markdown_from_data(src.name, data, cfg)
+
+
+def testsavvy_xml_output_filename(src: Path, cfg: AppConfig) -> str:
+    """
+    Try to name XML execution Markdown as <TestCaseID>_<RunID>.md.
+    Falls back to normalized source stem.
+    """
+    try:
+        tree = ET.parse(str(src), parser=ET.XMLParser())
+        root = tree.getroot()
+        auto_seq = extract_automation_sequence(root)
+        if auto_seq is not None:
+            tc_id = safe_filename_component(auto_seq.attrib.get("id", "") or src.stem)
+            run_id = safe_filename_component(auto_seq.attrib.get("run_id", "") or "run")
+            return f"{tc_id}_{run_id}.md"
+    except Exception:
+        pass
+
+    stem = safe_filename_component(src.stem)
+    stem = re.sub(r"\.dat$", "", stem, flags=re.IGNORECASE)
+    if "_" not in stem:
+        stem = f"XML_{stem}"
+    return f"{stem}.md"
+
+
+def compute_smart_output_path(src: Path, input_root: Path, cfg: AppConfig) -> Path:
+    """
+    Compute a NotebookLM-friendly output path for XML/JSON while retaining old behavior for Excel.
+    """
+    ext = src.suffix.lower().lstrip(".")
+    if (cfg.output_extension or "").lower() == ".md" and cfg.normalize_markdown_filenames and ext in {"xml", "json"}:
+        if ext == "xml":
+            out_name = testsavvy_xml_output_filename(src, cfg)
+        else:
+            try:
+                data = json.loads(src.read_text(encoding="utf-8-sig"))
+                out_name = testsavvy_json_output_filename(data, src.name)
+            except Exception:
+                stem = safe_filename_component(src.stem)
+                if "_" not in stem:
+                    stem = f"JSON_{stem}"
+                out_name = f"{stem}.md"
+
+        if cfg.output_structure == "flat":
+            return cfg.output_dir / out_name
+        rel_parent = src.relative_to(input_root).parent
+        return cfg.output_dir / rel_parent / out_name
+
+    return compute_output_path(src, input_root, cfg.output_dir, cfg.output_structure, cfg.output_extension)
+
+
+def process_standard_file(src: Path, out_path: Path, cfg: AppConfig):
+    """
+    Process JSON or XML source files and write the configured output artifact.
+    """
+    if out_path.exists() and not cfg.overwrite:
+        return True, f"SKIP (exists): {src}"
+
+    try:
+        ensure_parent_dir(out_path)
+        ext = src.suffix.lower().lstrip(".")
+
+        if ext == "json":
+            if (cfg.output_extension or "").lower() == ".md":
+                out_path.write_text(json_to_markdown(src, cfg), encoding="utf-8")
+            else:
+                pretty = pretty_print_json(src, cfg.indent, cfg.json_sort_keys)
+                out_path.write_text(pretty, encoding="utf-8")
+
+        elif ext == "xml":
+            if (cfg.output_extension or "").lower() == ".md":
+                md = xml_to_markdown(src, cfg)
+                out_path.write_text(md, encoding="utf-8")
+            else:
+                out_path.write_bytes(pretty_print_xml(src, cfg.indent, cfg.xml_encoding, cfg.preserve_xml_declaration))
+
+        else:
+            return True, f"SKIP (unsupported ext): {src}"
+
+        return True, f"OK: {src} -> {out_path}"
+    except Exception as e:
+        return False, f"FAIL: {src} ({type(e).__name__}: {e})"
+
+
+def process_zip_file(src: Path, cfg: AppConfig) -> Tuple[int, int, List[str]]:
+    """
+    Process JSON/XML files contained inside a zip without requiring the user to manually extract it.
+    Output is written under output/<zip-stem>/ using NotebookLM-friendly filenames.
+    """
+    messages: List[str] = []
+    written = 0
+    failed = 0
+    used_names: Dict[str, int] = {}
+
+    if not cfg.process_zip_files:
+        return 0, 0, [f"SKIP (zip processing disabled): {src}"]
+
+    try:
+        with zipfile.ZipFile(src) as zipf:
+            members = [m for m in zipf.infolist() if not m.is_dir()]
+            for member in members:
+                inner_name = member.filename
+                inner_ext = Path(inner_name).suffix.lower().lstrip(".")
+                if inner_ext not in {"json", "xml"}:
+                    messages.append(f"SKIP (zip member unsupported): {src}!{inner_name}")
+                    continue
+
+                try:
+                    raw = zipf.read(member)
+                    zip_output_root = cfg.output_dir / safe_filename_component(src.stem)
+
+                    if inner_ext == "json":
+                        data = json.loads(raw.decode("utf-8-sig"))
+                        out_name = testsavvy_json_output_filename(data, Path(inner_name).name)
+                        if out_name in used_names:
+                            used_names[out_name] += 1
+                            out_name = testsavvy_json_output_filename(data, Path(inner_name).name, used_names[out_name])
+                        else:
+                            used_names[out_name] = 1
+                        out_path = zip_output_root / out_name
+                        if out_path.exists() and not cfg.overwrite:
+                            messages.append(f"SKIP (exists): {src}!{inner_name}")
+                            continue
+                        ensure_parent_dir(out_path)
+                        out_path.write_text(json_to_markdown_from_data(Path(inner_name).name, data, cfg), encoding="utf-8")
+                        messages.append(f"OK: {src}!{inner_name} -> {out_path}")
+                        written += 1
+
+                    elif inner_ext == "xml":
+                        tmp_root = ET.fromstring(raw)
+                        out_name = f"{safe_filename_component(Path(inner_name).stem)}.md"
+                        out_path = zip_output_root / out_name
+                        if out_path.exists() and not cfg.overwrite:
+                            messages.append(f"SKIP (exists): {src}!{inner_name}")
+                            continue
+                        ensure_parent_dir(out_path)
+                        md = testsavvy_execution_report_markdown(Path(inner_name), tmp_root, cfg.include_xml_inventory)
+                        out_path.write_text(md, encoding="utf-8")
+                        messages.append(f"OK: {src}!{inner_name} -> {out_path}")
+                        written += 1
+
+                except Exception as e:
+                    messages.append(f"FAIL: {src}!{inner_name} ({type(e).__name__}: {e})")
+                    failed += 1
+
+    except Exception as e:
+        messages.append(f"FAIL: {src} ({type(e).__name__}: {e})")
+        failed += 1
+
+    return written, failed, messages
+
+
+def generate_notebooklm_payload_guide_markdown() -> str:
+    """
+    Generate a companion Markdown guide explaining TestSavvy XML/JSON payload structures,
+    including the critical JSON ordering and active/excluded execution rules.
+    """
+    return """# NotebookLM Guide: TestSavvy XML and JSON Markdown Payloads
+
+## Purpose
+
+This guide teaches NotebookLM how to read generated TestSavvy Markdown files. Upload this guide together with the generated `.md` files from XML execution payloads, Test Case JSON exports, and Interface Repository JSON exports.
+
+## Supported Payload Types
+
+| Payload Type | Source Shape | Generated Markdown Purpose |
+| --- | --- | --- |
+| TestSavvy XML Execution Payload | XML containing `automation_sequence`, `scenario`, and `step` nodes | Explains what TestSavvy actually executed in a specific run. This is the closest source to runtime truth. |
+| TestSavvy Test Case JSON Export | JSON object containing `automationSequence` and `sequenceList` | Explains the authored test case definition, including active scenarios, excluded scenarios, reusable steps, datasets, custom functions, and selectors. |
+| TestSavvy Interface Repository JSON Export | JSON object containing `export.interfaceMapName` and recursive `children` | Explains the interface map tree, logical element paths, actions, selector properties, and locator metadata. |
+| TestSavvy Group / Array JSON Export | JSON top-level array | Explains grouped/exported array content and provides a JSON inventory. |
+
+## Most Important Rule: JSON Array Order Is Not Execution Order
+
+For Test Case JSON exports, do not assume `$.sequenceList[]` physical array order is the order TestSavvy executes. The generator sorts scenarios by `sequence`, falling back to `original_sequence`, and preserves the raw JSON array location separately.
+
+Use these sections this way:
+
+| Section | Use For | Do Not Use For |
+| --- | --- | --- |
+| `## Active Runtime-Equivalent Scenario Index` | Understanding what the test case is expected to execute, sorted by TestSavvy sequence. | Debugging raw export order. |
+| `## Active Runtime-Equivalent Scenarios and Steps` | Step-by-step explanation of the active authored flow. | Counting disabled/excluded coverage. |
+| `## Excluded / Inactive Scenario Index` | Finding scenarios that exist in the JSON but are excluded from execution. | Answering what the test actually does. |
+| `## Excluded / Inactive Scenarios and Steps` | Troubleshooting disabled design content. | Runtime coverage claims. |
+| `## Full Raw JSON Scenario Inventory` | Debugging the raw export array and locating JSON paths. | Execution order. |
+| `## JSON Inventory` | Finding deeply nested source values. | Human-readable flow analysis unless no other section has the value. |
+
+## Active vs Excluded Execution Rules
+
+A TestSavvy JSON scenario should be considered active/executable only when:
+
+```text
+scenario.status is not false
+AND scenario.include_status is not false
+```
+
+A TestSavvy JSON step should be considered active/executable only when:
+
+```text
+parent scenario is active
+AND step.status is not false
+AND step.include_status is not false
+AND stepAssociation.status is not false
+```
+
+If any of those values are explicitly false, the generated Markdown marks the row as `Excluded / Not Executed` and records an `Exclusion Reason`, such as `scenario.include_status=false`, `step.include_status=false`, or `stepAssociation.status=false`.
+
+## How To Answer Coverage Questions
+
+When the user asks a coverage question such as:
+
+```text
+Which TestSavvy automated test cases click the Submit button?
+```
+
+NotebookLM should use `## Submit Button Execution Index` and count only rows where `Execution Status` is `Active / Executable`.
+
+If the user asks:
+
+```text
+Which test cases contain Submit, including excluded steps?
+```
+
+NotebookLM may include both `Active / Executable` and `Excluded / Not Executed` rows, but it must label them separately.
+
+## Test Case JSON Mapping
+
+| Business Term | JSON Location | Generated Markdown Location | Meaning |
+| --- | --- | --- | --- |
+| Test Case ID | `$.automationSequence.id` | `## Document Identity`; `## Test Case Summary` | The TestSavvy test case / automation sequence identifier. |
+| Test Case Name | `$.automationSequence.name` | Document title; `## Document Identity`; `## Test Case Summary` | Human-readable name of the test case. |
+| Raw Scenario List | `$.sequenceList[]` | `## Full Raw JSON Scenario Inventory` | Physical JSON export array. This is not necessarily execution order. |
+| Scenario Execution Order | `$.sequenceList[].sequence` | `## Active Runtime-Equivalent Scenario Index` | Primary scenario ordering field. |
+| Fallback Scenario Order | `$.sequenceList[].original_sequence` | `## Active Runtime-Equivalent Scenario Index` | Fallback ordering field when `sequence` is missing. |
+| Scenario Include Status | `$.sequenceList[].include_status` | Scenario index and scenario metadata tables | False means the scenario exists in JSON but should not be counted as executed coverage. |
+| Scenario Status | `$.sequenceList[].status` | Scenario index and scenario metadata tables | False means the scenario is inactive. |
+| Scenario Steps | `$.sequenceList[].scenarioFlowList[]` | Scenario step detail tables | Step/action definitions inside each scenario, sorted by step sequence. |
+| Step Include Status | `$.sequenceList[].scenarioFlowList[].include_status` | Scenario step detail table `Execution Status` and `Exclusion Reason` | False means the step exists in JSON but is excluded. |
+| Step Data Value | `$.sequenceList[].scenarioFlowList[].stepAssociation.value` | Scenario step detail table column `Value` | Data entered, selected, clicked, or passed into a custom function. |
+| Step Dataset | `$.sequenceList[].scenarioFlowList[].stepAssociation.dataset_name` | Scenario step detail table column `Dataset` | Dataset used by the step. |
+| Step Dataset Header | `$.sequenceList[].scenarioFlowList[].dataset_header_name` | Scenario step detail table column `Dataset Header` | Dataset field/header used by the step. |
+| Action Code | `$.sequenceList[].scenarioFlowList[].action_code` | Scenario step detail table column `Action Code`; `## Selector / Action Code Index` | Selenium/WebDriver/custom code for the step. |
+| Custom Function | Step `Value` or `Action Code` containing `@...` | `## Custom Functions and Dynamic Values` | TestSavvy custom functions and dynamic values. |
+
+## Test Case JSON Sections
+
+| Section | Meaning |
+| --- | --- |
+| `## Critical Ordering Rule` | Explicit reminder that raw JSON array order is not execution order. |
+| `## Active Runtime-Equivalent Scenario Index` | Active scenario flow sorted by `sequence` / `original_sequence`. |
+| `## Excluded / Inactive Scenario Index` | Disabled scenarios, still sorted by sequence for context. |
+| `## Full Raw JSON Scenario Inventory` | Raw export array order and JSON path references. |
+| `## Submit Button Execution Index` | Purpose-built coverage table for Submit button questions. |
+| `## Custom Functions and Dynamic Values` | Dynamic values, `@storeResult`, `@cgifx`, `@advantagefx`, and other custom function usage. |
+| `## Selector / Action Code Index` | Locator/action-code analysis table. |
+| `## Active Runtime-Equivalent Scenarios and Steps` | Detailed active scenario and step flow. |
+| `## Excluded / Inactive Scenarios and Steps` | Detailed disabled scenario and step content. |
+| `## JSON Inventory` | Flattened fallback source of truth. |
+
+## XML Execution Payload Mapping
+
+XML execution Markdown files are already runtime ordered because they come from the execution payload.
+
+| Business Term | XML Location | Generated Markdown Location | Meaning |
+| --- | --- | --- | --- |
+| Test Case ID | `automation_sequence/@id` | `## Execution Summary`; `## Automation Sequence Attributes` | TestSavvy test case / automation sequence identifier. |
+| Test Case Name | `automation_sequence/@name` | Title; `## Execution Summary`; `## Automation Sequence Attributes` | Human-readable automated test name. |
+| Run ID | `automation_sequence/@run_id` | `## Execution Summary`; `## Automation Sequence Attributes` | Specific execution run. |
+| Runtime Scenario Order | `scenario/@count_id` and payload order | `## Scenarios and Steps` | Actual execution order in that run. |
+| Runtime Step Order | `step/@count_id` and payload order | Scenario step detail table | Actual step order in that run. |
+| Action Code | `step/@action_code` | Scenario step detail table column `Action Code` | Runtime automation code/selectors. |
+
+## Interface Repository JSON Mapping
+
+| Business Term | JSON Location | Generated Markdown Location | Meaning |
+| --- | --- | --- | --- |
+| Interface Map Name | `$.export.interfaceMapName` | `## Document Identity`; `## Interface Root Summary` | Top-level interface map, such as `FIN`. |
+| Interface Element Name | Recursive `interfaceElementName` under `$.export.children[]` | `## Interface Element Index` | Human-readable UI element name. |
+| Text Path | Recursive `textPath` under `$.export.children[]` | `## Interface Element Index` | Full logical path to the interface element. |
+| ID Path | Recursive `idPath` under `$.export.children[]` | `## Interface Element Index` | TestSavvy internal path/id chain. |
+| Actions | Recursive `actions[]` under each element | `## Interface Actions and Properties` | Available action definitions such as Click, Enter, Verify. |
+| Selector Properties | `actions[].properties[]` | `## Selector Property Index` | Locator properties such as XPath, ID, name, aria-label, `data-qa`, and `data-qa-id`. |
+
+## Selector Analysis Rules
+
+For Test Case JSON, inspect `Action Code`, `Raw Step JSON`, and `## Selector / Action Code Index`. For Interface Repository JSON, inspect `## Selector Property Index` and `## Interface Actions and Properties`. These sections are the best sources for XPath, `data-qa`, `data-qa-id`, `aria-label`, ID, name, and other locator decisions.
+
+## NotebookLM-Friendly File Names
+
+Generated Markdown filenames are normalized so they contain underscores and end in `.md`.
+
+| Source Type | Filename Pattern |
+| --- | --- |
+| XML execution payload | `<TestCaseID>_<RunID>.md` |
+| Test Case JSON export | `TC_<TestCaseID>.md` |
+| Interface Repository JSON export | `IR_<InterfaceMapName>.md` |
+| Group JSON export | `GROUP_<source>.md` |
+
+Avoid stale filenames like `998_19586.dat.md`; regenerate them as `998_19586.md`.
+"""
+
 # -----------------------------------------------------------------------------
 # Command-line entry point
 # -----------------------------------------------------------------------------
@@ -1062,7 +2272,7 @@ def main() -> int:
     """
     Parse command-line arguments, load configuration, process all source files, and print a summary.
     """
-    ap = argparse.ArgumentParser(description="Process TestSavvy XML to Markdown reports and Excel tabs to Markdown.")
+    ap = argparse.ArgumentParser(description="Process TestSavvy XML, JSON, ZIP, and Excel artifacts to Markdown.")
     ap.add_argument("--config", required=True, help="Path to config JSON")
     args = ap.parse_args()
 
@@ -1086,6 +2296,14 @@ def main() -> int:
 
             total_considered += 1
             ext = src.suffix.lower().lstrip(".")
+
+            if ext == "zip":
+                z_written, z_failed, z_messages = process_zip_file(src, cfg)
+                for msg in z_messages:
+                    print(msg)
+                written += z_written
+                failed += z_failed
+                continue
 
             if ext in {"xlsx", "xlsm"}:
                 wb = load_workbook(filename=str(src), data_only=True, read_only=True)
@@ -1129,7 +2347,10 @@ def main() -> int:
 
             if cfg.xml_markdown_mode == "combined" and ext in {"xml", "json"} and (cfg.output_extension or "").lower() == ".md":
                 try:
-                    combined_chunks.append(build_combined_section_for_file(src, cfg))
+                    if ext == "xml":
+                        combined_chunks.append(build_combined_section_for_file(src, cfg))
+                    else:
+                        combined_chunks.append(json_to_markdown(src, cfg))
                     print(f"OK: {src} -> [combined markdown buffer]")
                     written += 1
                 except Exception as e:
@@ -1137,7 +2358,7 @@ def main() -> int:
                     failed += 1
                 continue
 
-            out_path = compute_output_path(src, input_dir, cfg.output_dir, cfg.output_structure, cfg.output_extension)
+            out_path = compute_smart_output_path(src, input_dir, cfg)
             success, msg = process_standard_file(src, out_path, cfg)
             print(msg)
             if success and msg.startswith("OK:"):
@@ -1156,6 +2377,17 @@ def main() -> int:
             print(f"FAIL: combined markdown ({type(e).__name__}: {e})")
             failed += 1
 
+    if cfg.generate_notebooklm_guide and (cfg.output_extension or "").lower() == ".md":
+        guide_path = cfg.output_dir / cfg.notebooklm_guide_filename
+        try:
+            ensure_parent_dir(guide_path)
+            guide_path.write_text(generate_notebooklm_payload_guide_markdown(), encoding="utf-8")
+            print(f"OK: wrote NotebookLM payload guide -> {guide_path}")
+            written += 1
+        except Exception as e:
+            print(f"FAIL: NotebookLM payload guide ({type(e).__name__}: {e})")
+            failed += 1
+
     print("\n=== Summary ===")
     print(f"Total considered: {total_considered}")
     print(f"Outputs written:  {written}")
@@ -1165,4 +2397,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
