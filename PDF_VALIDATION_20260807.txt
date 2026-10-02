@@ -1,0 +1,4 @@
+PDF pages: 8878
+Executions: 137
+Validation failures: 0
+Wrote: /mnt/data/pretty_printer_v4_pdf_intelligence/PDF_VALIDATION_20260807.json

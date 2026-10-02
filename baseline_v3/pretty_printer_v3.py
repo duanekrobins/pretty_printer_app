@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TestSavvy XML / Excel / JSON / PDF Pretty Printer and Execution Intelligence Generator
+TestSavvy XML / Excel / JSON Pretty Printer and Markdown Documentation Generator
 
 Developer: Duane K Robinson
 Organization: State of Utah
@@ -44,14 +44,6 @@ Primary Capabilities
 4. JSON Processing
    - Pretty prints JSON.
    - Can wrap pretty-printed JSON in Markdown code fences when output is .md.
-
-5. TestSavvy Execution-result PDF Processing
-   - Parses individual and combined TestSavvy execution result PDFs.
-   - Reconstructs Execution -> Iteration -> Scenario -> Step hierarchy.
-   - Preserves Pass, Fail, and Not Run steps.
-   - Extracts Dataset Value, Action Code, Message, and all labeled step metadata.
-   - Extracts embedded screenshots and links each image to its execution step.
-   - Generates Markdown, JSON/JSONL, CSV indexes, source PDFs, and visual manifests for AI querying.
 
 Recommended NotebookLM Use
 --------------------------
@@ -124,7 +116,6 @@ class AppConfig:
     json_inventory_max_rows: int
     json_table_max_rows: int
     process_zip_files: bool
-    pdf_settings: Dict[str, Any]
 
 
 def _normalize_extension(ext: Optional[str]) -> Optional[str]:
@@ -160,9 +151,9 @@ def load_config(config_path: Path) -> AppConfig:
 
     output_dir = Path(raw.get("output_dir", "./output")).expanduser().resolve()
 
-    file_types_raw = raw.get("file_types", ["xml", "json", "zip", "xlsx", "xlsm", "pdf"])
+    file_types_raw = raw.get("file_types", ["xml", "json", "zip", "xlsx", "xlsm"])
     file_types = tuple(ft.lower().strip(".") for ft in file_types_raw)
-    allowed = {"json", "xml", "zip", "xlsx", "xlsm", "pdf"}
+    allowed = {"json", "xml", "zip", "xlsx", "xlsm"}
     unknown = [ft for ft in file_types if ft not in allowed]
     if unknown:
         raise ValueError(f"Unknown file types in config: {unknown}. Allowed: {sorted(allowed)}")
@@ -209,7 +200,6 @@ def load_config(config_path: Path) -> AppConfig:
     json_inventory_max_rows = int(raw.get("json_inventory_max_rows", 5000))
     json_table_max_rows = int(raw.get("json_table_max_rows", 2000))
     process_zip_files = bool(raw.get("process_zip_files", True))
-    pdf_settings = dict(raw.get("pdf_settings", {}) or {})
 
     return AppConfig(
         input_dirs=input_dirs,
@@ -241,7 +231,6 @@ def load_config(config_path: Path) -> AppConfig:
         json_inventory_max_rows=json_inventory_max_rows,
         json_table_max_rows=json_table_max_rows,
         process_zip_files=process_zip_files,
-        pdf_settings=pdf_settings,
     )
 
 
@@ -2283,7 +2272,7 @@ def main() -> int:
     """
     Parse command-line arguments, load configuration, process all source files, and print a summary.
     """
-    ap = argparse.ArgumentParser(description="Process TestSavvy XML, JSON, ZIP, Excel, and execution-result PDF artifacts to AI-ready knowledge outputs.")
+    ap = argparse.ArgumentParser(description="Process TestSavvy XML, JSON, ZIP, and Excel artifacts to Markdown.")
     ap.add_argument("--config", required=True, help="Path to config JSON")
     args = ap.parse_args()
 
@@ -2307,19 +2296,6 @@ def main() -> int:
 
             total_considered += 1
             ext = src.suffix.lower().lstrip(".")
-
-            if ext == "pdf":
-                try:
-                    from testsavvy_pdf import process_testsavvy_pdf
-                    p_written, p_failed, p_messages = process_testsavvy_pdf(src, cfg)
-                    for msg in p_messages:
-                        print(msg)
-                    written += p_written
-                    failed += p_failed
-                except Exception as e:
-                    print(f"FAIL PDF: {src} ({type(e).__name__}: {e})")
-                    failed += 1
-                continue
 
             if ext == "zip":
                 z_written, z_failed, z_messages = process_zip_file(src, cfg)
