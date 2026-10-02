@@ -998,3 +998,449 @@ def parse_execution(doc: fitz.Document, start: int, end: int, global_step_offset
     )
     execution.validation = _validate_execution(execution)
     return execution
+
+# ---------------------------------------------------------------------------
+# Markdown and machine-readable outputs
+# ---------------------------------------------------------------------------
+
+def _md_escape(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return text.replace("|", "\\|").replace("\r", " ").replace("\n", "<br>")
+
+
+def _code_block(value: str, language: str = "text") -> List[str]:
+    return [f"```{language}", value or "", "```", ""]
+
+
+def execution_markdown(execution: ExecutionRecord) -> str:
+    lines: List[str] = []
+    lines.append(f"# TestSavvy Execution - {execution.test_case_id} - {execution.test_case_name}")
+    lines.append("")
+    lines.append("## Execution Summary")
+    lines.append("")
+    lines.append("| Field | Value |")
+    lines.append("| --- | --- |")
+    summary = {
+        "Test Case ID": execution.test_case_id,
+        "Test Case Name": execution.test_case_name,
+        "Run Status": execution.run_status,
+        "Run ID": execution.run_id,
+        "Machine Name": execution.machine_name,
+        "Execution Date": execution.execution_date,
+        "Received Date": execution.received_date,
+        "Executed By": execution.executed_by,
+        "Reason": execution.reason,
+        "Override Reason": execution.override_reason,
+        "Reported Problems": execution.reported_problems,
+        "Source PDF": execution.source_pdf,
+        "Source Pages": f"{execution.source_start_page}-{execution.source_end_page}",
+    }
+    for k, v in summary.items():
+        lines.append(f"| {k} | {_md_escape(v)} |")
+    lines.append("")
+
+    lines.append("## Result Validation")
+    lines.append("")
+    lines.append("| Measure | Value |")
+    lines.append("| --- | ---: |")
+    for k, v in execution.validation.items():
+        lines.append(f"| {_md_escape(k)} | {_md_escape(v)} |")
+    lines.append("")
+
+    current_scenario = None
+    for step in execution.steps:
+        if step.scenario != current_scenario:
+            current_scenario = step.scenario
+            lines.append(f"## Scenario {step.scenario_order}: {current_scenario}")
+            lines.append("")
+        lines.append(f"### Step {step.test_case_step_order}: {step.action_name} - {step.logical or step.english_text.normalized}")
+        lines.append("")
+        lines.append("| Field | Value |")
+        lines.append("| --- | --- |")
+        values = {
+            "Result": step.result,
+            "Action Name": step.action_name,
+            "Logical": step.logical,
+            "Physical": step.physical,
+            "Dataset Value": step.dataset_value.reconstructed or step.dataset_value.normalized,
+            "English Text": step.english_text.reconstructed or step.english_text.normalized,
+            "Dataset": step.dataset,
+            "Dataset Header": step.dataset_header,
+            "Test Condition": step.test_condition,
+            "Element Type": step.element_type,
+            "Timestamp": step.timestamp,
+            "Event Tags": ", ".join(step.event_tags),
+            "PDF Action Page": step.action_page,
+            "PDF Metadata Page": step.metadata_page,
+        }
+        for k, v in values.items():
+            lines.append(f"| {k} | {_md_escape(v)} |")
+        lines.append("")
+
+        if step.screenshot.present:
+            lines.append("#### Screenshot / Visual Evidence")
+            lines.append("")
+            lines.append(f"![Execution screenshot](screenshots/{step.screenshot.file})")
+            lines.append("")
+            lines.append(f"Screenshot file: `screenshots/{step.screenshot.file}`")
+            lines.append("")
+            if step.screenshot.ocr_text:
+                lines.append("##### OCR Text")
+                lines.append("")
+                lines.extend(_code_block(step.screenshot.ocr_text, "text"))
+
+        lines.append("#### Action Code")
+        lines.append("")
+        lines.extend(_code_block(step.action_code.reconstructed or step.action_code.as_displayed, "python"))
+
+        lines.append("#### Message")
+        lines.append("")
+        if step.message.reconstructed or step.message.as_displayed:
+            lines.extend(_code_block(step.message.reconstructed or step.message.as_displayed, "text"))
+        else:
+            lines.append("_No Message value was emitted._")
+            lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _step_flat_row(execution: ExecutionRecord, step: StepRecord) -> Dict[str, Any]:
+    return {
+        "test_case_id": execution.test_case_id,
+        "test_case_name": execution.test_case_name,
+        "run_id": execution.run_id,
+        "run_status": execution.run_status,
+        "machine_name": execution.machine_name,
+        "execution_date": execution.execution_date,
+        "executed_by": execution.executed_by,
+        "scenario_order": step.scenario_order,
+        "scenario": step.scenario,
+        "scenario_step_order": step.scenario_step_order,
+        "test_case_step_order": step.test_case_step_order,
+        "global_step_order": step.global_step_order,
+        "result": step.result,
+        "action_name": step.action_name,
+        "logical": step.logical,
+        "physical": step.physical,
+        "dataset_value": step.dataset_value.reconstructed or step.dataset_value.normalized,
+        "dataset_value_as_displayed": step.dataset_value.as_displayed,
+        "english_text": step.english_text.reconstructed or step.english_text.normalized,
+        "dataset": step.dataset,
+        "dataset_header": step.dataset_header,
+        "test_condition": step.test_condition,
+        "element_type": step.element_type,
+        "timestamp": step.timestamp,
+        "action_code": step.action_code.reconstructed or step.action_code.normalized,
+        "action_code_as_displayed": step.action_code.as_displayed,
+        "message": step.message.reconstructed or step.message.normalized,
+        "message_as_displayed": step.message.as_displayed,
+        "event_tags": ";".join(step.event_tags),
+        "screenshot_present": step.screenshot.present,
+        "screenshot_file_name": step.screenshot.file,
+        "screenshot_relative_path": (
+            f"TC_{_safe_component(execution.test_case_id)}_RUN_{_safe_component(execution.run_id)}/screenshots/{step.screenshot.file}"
+            if step.screenshot.present else ""
+        ),
+        "screenshot_sha256": step.screenshot.sha256,
+        "screenshot_ocr_text": step.screenshot.ocr_text,
+        "action_page": step.action_page,
+        "metadata_page": step.metadata_page,
+        "previous_step_order": step.previous_step_order,
+        "next_step_order": step.next_step_order,
+        "source_pdf": execution.source_pdf,
+    }
+
+
+def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    with path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _save_run_pdf(doc: fitz.Document, start: int, end: int, path: Path) -> None:
+    out = fitz.open()
+    out.insert_pdf(doc, from_page=start, to_page=end)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.save(path, garbage=4, deflate=True)
+    out.close()
+
+
+def _post_event_screenshot(execution: ExecutionRecord, event_step: StepRecord, strict_after: bool = False) -> Optional[StepRecord]:
+    """Return first screenshot-bearing step at or after (or strictly after) an event."""
+    for step in execution.steps:
+        if strict_after:
+            if step.test_case_step_order <= event_step.test_case_step_order:
+                continue
+        elif step.test_case_step_order < event_step.test_case_step_order:
+            continue
+        if step.screenshot.present:
+            return step
+    return None
+
+
+def event_index_rows(execution: ExecutionRecord) -> List[Dict[str, Any]]:
+    rows = []
+    for step in execution.steps:
+        for tag in step.event_tags:
+            post = _post_event_screenshot(execution, step)
+            next_visual = _post_event_screenshot(execution, step, strict_after=True)
+            rows.append({
+                "test_case_id": execution.test_case_id,
+                "test_case_name": execution.test_case_name,
+                "run_id": execution.run_id,
+                "run_status": execution.run_status,
+                "event_tag": tag,
+                "event_step_order": step.test_case_step_order,
+                "scenario": step.scenario,
+                "action_name": step.action_name,
+                "logical": step.logical,
+                "event_result": step.result,
+                "event_message": step.message.reconstructed or step.message.normalized,
+                "event_screenshot": step.screenshot.file,
+                "post_event_step_order": post.test_case_step_order if post else "",
+                "post_event_screenshot": post.screenshot.file if post else "",
+                "post_event_ocr_text": post.screenshot.ocr_text if post else "",
+                "next_visual_step_order": next_visual.test_case_step_order if next_visual else "",
+                "next_visual_screenshot": next_visual.screenshot.file if next_visual else "",
+                "next_visual_ocr_text": next_visual.screenshot.ocr_text if next_visual else "",
+                "source_pdf": execution.source_pdf,
+            })
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Corpus processor / Pretty Printer integration
+# ---------------------------------------------------------------------------
+
+
+def _summary_selected(summary: Dict[str, str], settings: Dict[str, Any]) -> bool:
+    """Cheap pre-filter using only the Execution Summary page."""
+    run_ids = {str(x) for x in settings.get("run_ids", []) if str(x).strip()}
+    tc_ids = {str(x) for x in settings.get("test_case_ids", []) if str(x).strip()}
+    statuses = {str(x).lower() for x in settings.get("statuses", []) if str(x).strip()}
+    if run_ids and summary.get("run_id", "") not in run_ids:
+        return False
+    if tc_ids and summary.get("test_case_id", "") not in tc_ids:
+        return False
+    if statuses and summary.get("run_status", "").lower() not in statuses:
+        return False
+    return True
+
+def _selected(execution: ExecutionRecord, settings: Dict[str, Any]) -> bool:
+    run_ids = {str(x) for x in settings.get("run_ids", []) if str(x).strip()}
+    tc_ids = {str(x) for x in settings.get("test_case_ids", []) if str(x).strip()}
+    statuses = {str(x).lower() for x in settings.get("statuses", []) if str(x).strip()}
+    if run_ids and execution.run_id not in run_ids:
+        return False
+    if tc_ids and execution.test_case_id not in tc_ids:
+        return False
+    if statuses and execution.run_status.lower() not in statuses:
+        return False
+    return True
+
+
+def process_testsavvy_pdf(src: Path, cfg: Any) -> Tuple[int, int, List[str]]:
+    """
+    Pretty Printer integration point.
+
+    Returns (outputs_written, failures, console_messages).
+    """
+    settings = dict(getattr(cfg, "pdf_settings", {}) or {})
+    output_root = Path(cfg.output_dir) / settings.get("output_subdir", "testsavvy_execution_reports") / _safe_component(src.stem)
+    extract_images = bool(settings.get("extract_images", True))
+    preserve_run_pdf = bool(settings.get("preserve_run_pdf", True))
+    write_json = bool(settings.get("write_json", True))
+    write_csv = bool(settings.get("write_csv", True))
+    write_jsonl = bool(settings.get("write_jsonl", True))
+    ocr_mode = str(settings.get("ocr_mode", "off")).strip().lower()
+    ocr_language = str(settings.get("ocr_language", "eng"))
+    tesseract_executable = str(settings.get("tesseract_executable_path", "") or "").strip()
+    if pytesseract is not None and tesseract_executable and Path(tesseract_executable).exists():
+        pytesseract.pytesseract.tesseract_cmd = tesseract_executable
+    max_runs = int(settings.get("max_runs", 0) or 0)
+
+    messages: List[str] = []
+    failures = 0
+    written = 0
+
+    doc = fitz.open(src)
+    try:
+        ranges = find_execution_ranges(doc)
+        messages.append(f"PDF: {src.name}: detected {len(ranges)} TestSavvy execution(s) across {doc.page_count} pages")
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        executions: List[ExecutionRecord] = []
+        global_step_offset = 0
+        selected_count = 0
+        for run_index, (start, end) in enumerate(ranges, start=1):
+            try:
+                # Filter combined PDFs from the summary page before parsing all
+                # scenario/step detail pages. This makes targeted runs fast.
+                summary_probe = parse_execution_summary(doc[start])
+                if not _summary_selected(summary_probe, settings):
+                    continue
+                selected_count += 1
+                if max_runs and selected_count > max_runs:
+                    break
+                execution = parse_execution(doc, start, end, global_step_offset)
+                execution.source_pdf = src.name
+                if not _selected(execution, settings):
+                    continue
+                run_dir = output_root / f"TC_{_safe_component(execution.test_case_id)}_RUN_{_safe_component(execution.run_id)}"
+                run_dir.mkdir(parents=True, exist_ok=True)
+
+                if extract_images:
+                    associate_and_extract_screenshots(
+                        doc, start, execution.steps, run_dir / "screenshots", ocr_mode, ocr_language
+                    )
+
+                # Re-run validation after screenshots are attached.
+                execution.validation = _validate_execution(execution)
+
+                if preserve_run_pdf:
+                    _save_run_pdf(doc, start, end, run_dir / "source.pdf")
+                    written += 1
+
+                (run_dir / "execution.md").write_text(execution_markdown(execution), encoding="utf-8")
+                written += 1
+
+                if write_json:
+                    (run_dir / "execution.json").write_text(
+                        json.dumps(asdict(execution), indent=2, ensure_ascii=False), encoding="utf-8"
+                    )
+                    written += 1
+
+                if write_csv:
+                    _write_csv(run_dir / "execution_steps.csv", [_step_flat_row(execution, s) for s in execution.steps])
+                    written += 1
+
+                executions.append(execution)
+                global_step_offset += len(execution.steps)
+                messages.append(
+                    f"OK PDF RUN: TC {execution.test_case_id} / Run {execution.run_id} / {execution.run_status} / "
+                    f"steps={len(execution.steps)} validation={execution.validation.get('status')} -> {run_dir}"
+                )
+            except Exception as exc:
+                failures += 1
+                messages.append(f"FAIL PDF RUN {run_index} pages {start+1}-{end+1}: {type(exc).__name__}: {exc}")
+
+        # Corpus-wide indexes.
+        summary_rows = []
+        step_rows = []
+        screenshot_rows = []
+        failure_rows = []
+        event_rows = []
+        for execution in executions:
+            summary_rows.append({
+                "test_case_id": execution.test_case_id,
+                "test_case_name": execution.test_case_name,
+                "run_id": execution.run_id,
+                "run_status": execution.run_status,
+                "machine_name": execution.machine_name,
+                "execution_date": execution.execution_date,
+                "received_date": execution.received_date,
+                "executed_by": execution.executed_by,
+                "source_start_page": execution.source_start_page,
+                "source_end_page": execution.source_end_page,
+                "parsed_steps": len(execution.steps),
+                "parsed_pass": execution.validation.get("parsed_pass"),
+                "parsed_fail": execution.validation.get("parsed_fail"),
+                "parsed_not_run": execution.validation.get("parsed_not_run"),
+                "screenshots": execution.validation.get("screenshot_count"),
+                "validation_status": execution.validation.get("status"),
+                "source_pdf": execution.source_pdf,
+            })
+            for step in execution.steps:
+                row = _step_flat_row(execution, step)
+                step_rows.append(row)
+                if step.screenshot.present:
+                    screenshot_rows.append({
+                        "test_case_id": execution.test_case_id,
+                        "test_case_name": execution.test_case_name,
+                        "run_id": execution.run_id,
+                        "run_status": execution.run_status,
+                        "scenario": step.scenario,
+                        "step_order": step.test_case_step_order,
+                        "result": step.result,
+                        "action_name": step.action_name,
+                        "logical": step.logical,
+                        "timestamp": step.timestamp,
+                        "source_page": step.screenshot.source_page,
+                        "file": step.screenshot.file,
+                        "relative_path": f"TC_{_safe_component(execution.test_case_id)}_RUN_{_safe_component(execution.run_id)}/screenshots/{step.screenshot.file}",
+                        "sha256": step.screenshot.sha256,
+                        "ocr_status": step.screenshot.ocr_status,
+                        "ocr_text": step.screenshot.ocr_text,
+                    })
+                if step.result in {"Fail", "Not Run"}:
+                    failure_rows.append(row)
+            event_rows.extend(event_index_rows(execution))
+
+        if executions:
+            _write_csv(output_root / "execution_summaries.csv", summary_rows)
+            _write_csv(output_root / "execution_steps.csv", step_rows)
+            _write_csv(output_root / "screenshot_manifest.csv", screenshot_rows)
+            _write_csv(output_root / "failure_and_not_run_index.csv", failure_rows)
+            _write_csv(output_root / "event_index.csv", event_rows)
+            written += 5
+
+            if write_jsonl:
+                _write_jsonl(output_root / "execution_steps.jsonl", step_rows)
+                _write_jsonl(output_root / "screenshot_manifest.jsonl", screenshot_rows)
+                _write_jsonl(output_root / "event_index.jsonl", event_rows)
+                written += 3
+
+            index_lines = [
+                f"# TestSavvy Execution Corpus - {src.name}",
+                "",
+                f"Detected executions: **{len(ranges)}**",
+                f"Selected / generated executions: **{len(executions)}**",
+                "",
+                "| Test Case | Name | Run ID | Status | Pages | Steps | Pass | Fail | Not Run | Validation |",
+                "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+            ]
+            for e in executions:
+                rel = f"TC_{_safe_component(e.test_case_id)}_RUN_{_safe_component(e.run_id)}/execution.md"
+                index_lines.append(
+                    f"| [{e.test_case_id}]({rel}) | {_md_escape(e.test_case_name)} | {e.run_id} | {e.run_status} | "
+                    f"{e.source_start_page}-{e.source_end_page} | {len(e.steps)} | "
+                    f"{e.validation.get('parsed_pass')} | {e.validation.get('parsed_fail')} | {e.validation.get('parsed_not_run')} | "
+                    f"{e.validation.get('status')} |"
+                )
+            (output_root / "INDEX.md").write_text("\n".join(index_lines) + "\n", encoding="utf-8")
+            written += 1
+
+            corpus_manifest = {
+                "source_pdf": src.name,
+                "source_pdf_pages": doc.page_count,
+                "detected_executions": len(ranges),
+                "selected_executions": len(executions),
+                "total_steps": len(step_rows),
+                "total_screenshots": len(screenshot_rows),
+                "run_status_counts": {},
+                "result_counts": {
+                    "Pass": sum(1 for r in step_rows if r["result"] == "Pass"),
+                    "Fail": sum(1 for r in step_rows if r["result"] == "Fail"),
+                    "Not Run": sum(1 for r in step_rows if r["result"] == "Not Run"),
+                },
+            }
+            for e in executions:
+                corpus_manifest["run_status_counts"][e.run_status] = corpus_manifest["run_status_counts"].get(e.run_status, 0) + 1
+            (output_root / "corpus_manifest.json").write_text(json.dumps(corpus_manifest, indent=2), encoding="utf-8")
+            written += 1
+
+        return written, failures, messages
+    finally:
+        doc.close()
