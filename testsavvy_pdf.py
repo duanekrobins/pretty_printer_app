@@ -999,6 +999,7 @@ def parse_execution(doc: fitz.Document, start: int, end: int, global_step_offset
     execution.validation = _validate_execution(execution)
     return execution
 
+
 # ---------------------------------------------------------------------------
 # Markdown and machine-readable outputs
 # ---------------------------------------------------------------------------
