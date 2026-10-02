@@ -8,7 +8,8 @@
         "json",
         "zip",
         "xlsx",
-        "xlsm"
+        "xlsm",
+        "pdf"
     ],
     "recursive": true,
     "overwrite": true,
@@ -35,5 +36,20 @@
     "include_json_inventory": true,
     "json_inventory_max_rows": 5000,
     "json_table_max_rows": 10000,
-    "process_zip_files": true
+    "process_zip_files": true,
+    "pdf_settings": {
+        "output_subdir": "testsavvy_execution_reports",
+        "extract_images": true,
+        "preserve_run_pdf": true,
+        "write_json": true,
+        "write_csv": true,
+        "write_jsonl": true,
+        "ocr_mode": "off",
+        "ocr_language": "eng",
+        "max_runs": 0,
+        "run_ids": [],
+        "test_case_ids": [],
+        "statuses": [],
+        "tesseract_executable_path": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
+    }
 }
