@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""
+TestSavvy execution-result PDF intelligence engine.
+
+This module extends Pretty Printer with a loss-preserving parser for TestSavvy
+execution result PDFs. It supports both individual execution reports and large
+combined PDFs containing many execution reports.
+
+Design goals
+------------
+1. Treat the PDF as evidence, not merely text to summarize.
+2. Reconstruct the report hierarchy:
+       Execution -> Iteration -> Scenario -> Step
+3. Preserve every step field:
+       Result, Action Name, Logical, Physical, Dataset Value, English Text,
+       Dataset, Dataset Header, Test Condition, Element Type, Timestamp,
+       Action Code, Message.
+4. Preserve and link embedded screenshots to the exact step that produced them.
+5. Preserve Pass, Fail, and Not Run steps.
+6. Keep source provenance (PDF page and geometry) for every extracted record.
+7. Emit Markdown, JSON/JSONL, CSV, image manifests, failure indexes, and the
+   per-run source PDF so an AI system can answer arbitrary questions while
+   retaining access to the original visual evidence.
+
+The parser is intentionally stateful and sequence-oriented because TestSavvy
+records can cross PDF page boundaries. A step can begin on one page while its
+Dataset metadata / Action Code / Message continues on the next page.
+"""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+import re
+import shutil
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import fitz  # PyMuPDF
+
+try:
+    import pytesseract
+    from PIL import Image
+except Exception:  # OCR is optional at runtime
+    pytesseract = None
+    Image = None
+
+
+# ---------------------------------------------------------------------------
+# Constants based on the stable TestSavvy landscape report geometry.
+# They are used as column anchors, not as brittle full-page templates.
+# ---------------------------------------------------------------------------
+
+STEP_COLUMNS: Tuple[Tuple[str, float, float], ...] = (
+    ("result", 150.0, 230.0),
+    ("action_name", 230.0, 286.5),
+    ("logical", 286.5, 354.5),
+    ("physical", 354.5, 434.5),
+    ("dataset_value", 434.5, 506.5),
+    ("english_text", 506.5, 579.5),
+)
+
+META_COLUMNS: Tuple[Tuple[str, float, float], ...] = (
+    ("dataset", 286.5, 354.5),
+    ("dataset_header", 354.5, 434.5),
+    ("test_condition", 434.5, 578.5),
+    ("element_type", 578.5, 649.5),
+    ("timestamp", 649.5, 760.0),
+)
+
+KNOWN_ACTION_NAMES = {
+    "Click",
+    "Enter Text",
+    "Wait",
+    "Verify Exists",
+    "Smart Wait",
+    "Open Browser",
+    "END IF",
+    "IF",
+    "Close Browser",
+    "Custom Function",
+    "Verify Text",
+    "Select",
+    "Verify",
+    "Enter",
+    "Set Runtime Value",
+    "While",
+    "Next",
+    "Explicit Wait",
+    "Dropdown Options",
+}
+
+RESULT_VALUES = {"Pass", "Fail", "Not Run"}
+
+
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TextEvidence:
+    as_displayed: str = ""
+    normalized: str = ""
+    reconstructed: str = ""
+
+
+@dataclass
+class ScreenshotEvidence:
+    present: bool = False
+    file: str = ""
+    width: int = 0
+    height: int = 0
+    source_page: int = 0  # 1-based page number in source PDF
+    run_page: int = 0     # 1-based page number inside this run
+    xref: int = 0
+    bbox: List[float] = field(default_factory=list)
+    sha256: str = ""
+    ocr_text: str = ""
+    ocr_status: str = "not_requested"
+
+
+@dataclass
+class StepRecord:
+    global_step_order: int
+    test_case_step_order: int
+    scenario_step_order: int
+    scenario_order: int
+    scenario: str
+    result: str
+    action_name: str
+    logical: str
+    physical: str
+    dataset_value: TextEvidence
+    english_text: TextEvidence
+    dataset: str = ""
+    dataset_header: str = ""
+    test_condition: str = ""
+    element_type: str = ""
+    timestamp: str = ""
+    action_code: TextEvidence = field(default_factory=TextEvidence)
+    message: TextEvidence = field(default_factory=TextEvidence)
+    screenshot: ScreenshotEvidence = field(default_factory=ScreenshotEvidence)
+    action_page: int = 0
+    metadata_page: int = 0
+    action_y: float = 0.0
+    metadata_y: float = 0.0
+    previous_step_order: Optional[int] = None
+    next_step_order: Optional[int] = None
+    event_tags: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ScenarioRecord:
+    scenario_order: int
+    scenario: str
+    steps_passed: Optional[int]
+    steps_failed: Optional[int]
+    steps_not_run: Optional[int]
+    post_verify: Optional[int]
+    source_page: int
+    y: float
+
+
+@dataclass
+class ExecutionRecord:
+    source_pdf: str
+    source_start_page: int
+    source_end_page: int
+    test_case_id: str
+    test_case_name: str
+    run_status: str
+    run_id: str
+    machine_name: str
+    execution_date: str
+    reason: str
+    received_date: str
+    override_reason: str
+    executed_by: str
