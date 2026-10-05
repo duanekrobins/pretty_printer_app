@@ -10,7 +10,10 @@ if not exist ".venv\Scripts\python.exe" (
 
 call ".venv\Scripts\activate.bat"
 python -m pip install --upgrade pip
+if errorlevel 1 goto :setup_failed
+
 python -m pip install -r requirements.txt
+if errorlevel 1 goto :setup_failed
 
 echo.
 where java >nul 2>&1
@@ -23,13 +26,13 @@ if errorlevel 1 (
     java -version
 )
 
-if errorlevel 1 (
-    echo.
-    echo Setup failed.
-    exit /b 1
-)
-
 echo.
 echo Pretty Printer environment is ready.
-echo Run: run_pretty_printer.cmd
+echo Run TestSavvy processing: run_pretty_printer.cmd
+echo Run Vantage PDF Markdown: run_vantage_pdf_to_markdown.cmd
 exit /b 0
+
+:setup_failed
+echo.
+echo Setup failed.
+exit /b 1
