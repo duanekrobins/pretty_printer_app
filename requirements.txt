@@ -4,4 +4,3 @@ pytesseract
 Pillow
 beautifulsoup4
 lxml
-opendataloader-pdf
