@@ -41,7 +41,7 @@
             "image_format": "png",
             "table_method": "cluster",
             "reading_order": "xycut",
-            "markdown_page_separator": "\\n\\n---\\n\\n**Source PDF page %page-number%**\\n\\n",
+            "markdown_page_separator": "\n\n---\n\n**Source PDF page %page-number%**\n\n",
             "include_header_footer": false,
             "keep_line_breaks": false,
             "threads": "1",
