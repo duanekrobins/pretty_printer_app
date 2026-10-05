@@ -26,13 +26,15 @@ Both paths are relative to the Pretty Printer repository root by default.
 
 ```bat
 setup_windows.cmd
+setup_vantage_pdf_to_markdown.cmd
 ```
 
 Requirements:
 
 - Python 3.10 or newer
 - Java 11 or newer for OpenDataLoader
-- packages from `requirements.txt`
+- core packages from `requirements.txt`
+- OpenDataLoader from `requirements_general_pdf.txt`
 
 Verify Java:
 
