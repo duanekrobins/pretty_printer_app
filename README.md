@@ -1,53 +1,183 @@
 <img src="assets/GovOps_Division_of_Finance_logo.jpg" alt="State of Utah Division of Finance" width="420">
 
-# TestSavvy Pretty Printer V4 - execution PDF intelligence
+# TestSavvy Pretty Printer V4
 
-Pretty Printer V4 preserves all existing TestSavvy XML, JSON, ZIP, and Excel capabilities and adds a full execution-result PDF pipeline.
+TestSavvy Pretty Printer V4 converts TestSavvy execution evidence and general Vantage/Advantage documentation into AI-ready knowledge outputs.
 
-## What the PDF engine produces
+Version 4.1 adds a second PDF path while preserving the specialized execution-result parser.
 
-For individual or combined TestSavvy execution-result PDFs it detects execution boundaries, reconstructs Test Case -> Iteration -> Scenario -> Step order, extracts all report fields, retains `Pass`, `Fail`, and `Not Run`, extracts original embedded screenshots, and writes queryable Markdown, JSON, JSONL, CSV, source PDFs, and visual indexes.
+## Supported inputs
 
-The canonical step corpus includes Dataset Value, English Text, Dataset, Dataset Header, Test Condition, Element Type, Timestamp, Action Code, Message, screenshot references, event tags, and PDF provenance.
+- TestSavvy execution-result PDFs
+- General Vantage/Advantage PDFs
+- XML
+- JSON
+- ZIP
+- XLSX/XLSM
 
-## Windows quick start
+## PDF processing modes
 
-1. Run `setup_windows.cmd` once.
-2. Put TestSavvy PDFs in `input\`.
-3. Run `run_pretty_printer.cmd`.
-4. Review `output\testsavvy_execution_reports\`.
-5. Run `validate_pdf.cmd "C:\path\to\combined_results.pdf"` when you want a corpus-wide parser validation check.
+Pretty Printer now has two deliberately separate PDF engines.
 
-## Combined PDF filtering
+### 1. TestSavvy execution-result intelligence
 
-Use `pdf_settings` in `pretty_print_config.json` to process only selected runs while testing:
+Use:
 
 ```json
 "pdf_settings": {
-    "run_ids": ["20426"],
-    "test_case_ids": [],
-    "statuses": [],
-    "max_runs": 0
+    "mode": "testsavvy_execution"
 }
 ```
 
-Set the lists back to empty to process every execution.
+This uses `testsavvy_pdf.py` and reconstructs execution boundaries, Test Case -> Iteration -> Scenario -> Step order, Pass/Fail/Not Run results, runtime metadata, screenshots, source PDFs, Markdown, JSON, JSONL, CSV, and visual/event indexes.
 
-## Screenshot OCR
+### 2. General Vantage/Advantage PDF -> Markdown
 
-Screenshots are always preserved when `extract_images=true`. OCR is optional supplemental evidence and never replaces the original image.
+Use:
 
-Supported `ocr_mode` values:
+```json
+"pdf_settings": {
+    "mode": "general_markdown"
+}
+```
 
-- `off`
-- `failures`
-- `failures_and_key_events`
-- `all`
+This uses `general_pdf.py` with OpenDataLoader PDF. It is intended for administration guides, financial run sheets, user guides, configuration guides, and other normal Vantage/Advantage documentation.
 
-For multimodal AI questions, keep the per-run `source.pdf` and extracted screenshots with the structured corpus.
+The default general-document settings use:
 
-## Validation status
+- detailed Markdown output
+- HTML inside Markdown for complex tables
+- cluster table detection
+- XY-Cut reading order
+- external PNG image extraction
+- source-PDF page separators
+- normalized line wrapping
+- header/footer suppression
+- deterministic single-thread processing
+- optional hybrid mode
 
-The parser was validated against the supplied 8,878-page combined TestSavvy report. All 137 detected executions matched their report-level Pass/Fail/Not Run totals in the current validation run.
+## Windows setup
 
-See `NOTEBOOKLM_TESTSAVVY_EXECUTION_PDF_GUIDE.md` for AI query guidance.
+Base Pretty Printer setup:
+
+```bat
+setup_windows.cmd
+```
+
+This creates `.venv` and installs the core Pretty Printer dependencies.
+
+For general Vantage/Advantage PDF -> Markdown support, run the additional setup:
+
+```bat
+setup_vantage_pdf_to_markdown.cmd
+```
+
+That script verifies Java 11+ and installs the optional OpenDataLoader dependency from `requirements_general_pdf.txt`. TestSavvy execution-result parsing remains independent of Java/OpenDataLoader.
+
+## TestSavvy execution-result quick start
+
+1. Put TestSavvy execution-result PDFs in `input\`.
+2. Confirm `pretty_print_config.json` uses `pdf_settings.mode = "testsavvy_execution"`.
+3. Run:
+
+```bat
+run_pretty_printer.cmd
+```
+
+4. Review `output\testsavvy_execution_reports\`.
+5. For a baseline validation run:
+
+```bat
+validate_pdf.cmd "C:\path\to\combined_results.pdf"
+```
+
+## Vantage/Advantage documentation quick start
+
+A dedicated batch runner is included because OpenDataLoader can process an entire directory with one JVM rather than starting Java once per PDF.
+
+1. Complete the one-time general PDF setup:
+
+```bat
+setup_vantage_pdf_to_markdown.cmd
+```
+
+2. Put all Vantage/Advantage PDFs under:
+
+```text
+inputs\
+```
+
+3. Run:
+
+```bat
+run_vantage_pdf_to_markdown.cmd
+```
+
+4. Markdown and extracted image assets are written under:
+
+```text
+outputs\
+```
+
+Useful commands:
+
+```bat
+run_vantage_pdf_to_markdown.cmd --list-only
+run_vantage_pdf_to_markdown.cmd --clean
+```
+
+The Vantage runner uses `pretty_print_config_vantage.json`.
+
+## General PDF configuration
+
+The main general-document options are under:
+
+```json
+"pdf_settings": {
+    "mode": "general_markdown",
+    "general_output_subdir": "",
+    "general_markdown": {
+        "markdown_with_html": true,
+        "image_output": "external",
+        "image_format": "png",
+        "table_method": "cluster",
+        "reading_order": "xycut",
+        "markdown_page_separator": "\n\n---\n\n**Source PDF page %page-number%**\n\n",
+        "include_header_footer": false,
+        "keep_line_breaks": false,
+        "threads": "1",
+        "quiet": false,
+        "hybrid_enabled": false,
+        "hybrid_backend": "docling-fast",
+        "hybrid_mode": "auto"
+    }
+}
+```
+
+For the dedicated Vantage runner, these values are already supplied in `pretty_print_config_vantage.json`.
+
+## Why the PDF engines remain separate
+
+A TestSavvy execution-result PDF is structured runtime evidence and needs a purpose-built parser. A normal Vantage guide is a document-layout problem and benefits from OpenDataLoader's reading-order, table, and image extraction.
+
+Keeping both paths separate prevents general-document conversion from weakening the validated execution parser.
+
+## Output validation
+
+The Vantage batch runner:
+
+- discovers every PDF recursively
+- rejects duplicate PDF base names before conversion
+- converts the directory in one OpenDataLoader invocation
+- confirms that each input PDF produced a non-empty Markdown file
+- writes `conversion_manifest.json`
+- writes `conversion_manifest.csv`
+
+## Existing TestSavvy PDF validation
+
+The execution-result parser was validated against the supplied 8,878-page combined TestSavvy report. The current validation artifact contains 137 detected executions and zero validation failures.
+
+See:
+
+- `NOTEBOOKLM_TESTSAVVY_EXECUTION_PDF_GUIDE.md`
+- `NOTEBOOKLM_TESTSAVVY_XML_JSON_ORDERING_GUIDE.md`

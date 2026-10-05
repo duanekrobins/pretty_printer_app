@@ -10,15 +10,20 @@ if not exist ".venv\Scripts\python.exe" (
 
 call ".venv\Scripts\activate.bat"
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+if errorlevel 1 goto :setup_failed
 
-if errorlevel 1 (
-    echo.
-    echo Setup failed.
-    exit /b 1
-)
+python -m pip install -r requirements.txt
+if errorlevel 1 goto :setup_failed
 
 echo.
-echo Pretty Printer environment is ready.
-echo Run: run_pretty_printer.cmd
+echo Pretty Printer base environment is ready.
+echo Run TestSavvy processing: run_pretty_printer.cmd
+echo.
+echo For general Vantage/Advantage PDF-to-Markdown support, also run:
+echo setup_vantage_pdf_to_markdown.cmd
 exit /b 0
+
+:setup_failed
+echo.
+echo Setup failed.
+exit /b 1

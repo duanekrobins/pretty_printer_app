@@ -1,0 +1,29 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local TestSavvy/Vantage input and generated output
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
+inputs/*
+!inputs/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+# Large source/generated document artifacts
+*.pdf
+*.jpg
+*.jpeg
+*.png
+
+# Keep repository branding asset
+!assets/GovOps_Division_of_Finance_logo.jpg
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

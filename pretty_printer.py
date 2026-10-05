@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TestSavvy XML / Excel / JSON / PDF Pretty Printer and Execution Intelligence Generator
+TestSavvy XML / Excel / JSON / PDF Pretty Printer, Execution Intelligence, and General Document Converter
 
 Developer: Duane K Robinson
 Organization: State of Utah
@@ -210,6 +210,13 @@ def load_config(config_path: Path) -> AppConfig:
     json_table_max_rows = int(raw.get("json_table_max_rows", 2000))
     process_zip_files = bool(raw.get("process_zip_files", True))
     pdf_settings = dict(raw.get("pdf_settings", {}) or {})
+    pdf_mode = str(pdf_settings.get("mode", "testsavvy_execution")).strip().lower()
+    allowed_pdf_modes = {"testsavvy_execution", "general_markdown"}
+    if pdf_mode not in allowed_pdf_modes:
+        raise ValueError(
+            "pdf_settings.mode must be 'testsavvy_execution' or 'general_markdown'."
+        )
+    pdf_settings["mode"] = pdf_mode
 
     return AppConfig(
         input_dirs=input_dirs,
@@ -2283,7 +2290,7 @@ def main() -> int:
     """
     Parse command-line arguments, load configuration, process all source files, and print a summary.
     """
-    ap = argparse.ArgumentParser(description="Process TestSavvy XML, JSON, ZIP, Excel, and execution-result PDF artifacts to AI-ready knowledge outputs.")
+    ap = argparse.ArgumentParser(description="Process TestSavvy XML, JSON, ZIP, Excel, execution-result PDFs, and general PDFs into AI-ready knowledge outputs.")
     ap.add_argument("--config", required=True, help="Path to config JSON")
     args = ap.parse_args()
 
@@ -2309,15 +2316,26 @@ def main() -> int:
             ext = src.suffix.lower().lstrip(".")
 
             if ext == "pdf":
+                pdf_mode = str(cfg.pdf_settings.get("mode", "testsavvy_execution")).lower()
                 try:
-                    from testsavvy_pdf import process_testsavvy_pdf
-                    p_written, p_failed, p_messages = process_testsavvy_pdf(src, cfg)
+                    if pdf_mode == "general_markdown":
+                        from general_pdf import process_general_pdf
+                        p_written, p_failed, p_messages = process_general_pdf(
+                            src, cfg, input_root=input_dir
+                        )
+                    else:
+                        from testsavvy_pdf import process_testsavvy_pdf
+                        p_written, p_failed, p_messages = process_testsavvy_pdf(src, cfg)
+
                     for msg in p_messages:
                         print(msg)
                     written += p_written
                     failed += p_failed
                 except Exception as e:
-                    print(f"FAIL PDF: {src} ({type(e).__name__}: {e})")
+                    print(
+                        f"FAIL PDF [{pdf_mode}]: {src} "
+                        f"({type(e).__name__}: {e})"
+                    )
                     failed += 1
                 continue
 

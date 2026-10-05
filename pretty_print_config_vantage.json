@@ -1,14 +1,9 @@
 {
     "input_dirs": [
-        "./input"
+        "./inputs"
     ],
-    "output_dir": "./output",
+    "output_dir": "./outputs",
     "file_types": [
-        "xml",
-        "json",
-        "zip",
-        "xlsx",
-        "xlsm",
         "pdf"
     ],
     "recursive": true,
@@ -28,7 +23,7 @@
     "excel_max_cell_length": 500,
     "excel_sheet_name_in_filename": true,
     "include_xml_inventory": true,
-    "generate_notebooklm_guide": true,
+    "generate_notebooklm_guide": false,
     "notebooklm_guide_filename": "NOTEBOOKLM_TESTSAVVY_XML_JSON_ORDERING_GUIDE.md",
     "notebooklm_enhanced_format": true,
     "normalize_markdown_filenames": true,
@@ -38,21 +33,8 @@
     "json_table_max_rows": 10000,
     "process_zip_files": true,
     "pdf_settings": {
-        "output_subdir": "testsavvy_execution_reports",
-        "extract_images": true,
-        "preserve_run_pdf": true,
-        "write_json": true,
-        "write_csv": true,
-        "write_jsonl": true,
-        "ocr_mode": "off",
-        "ocr_language": "eng",
-        "max_runs": 0,
-        "run_ids": [],
-        "test_case_ids": [],
-        "statuses": [],
-        "tesseract_executable_path": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
-        "mode": "testsavvy_execution",
-        "general_output_subdir": "general_pdf_markdown",
+        "mode": "general_markdown",
+        "general_output_subdir": "",
         "general_markdown": {
             "markdown_with_html": true,
             "image_output": "external",
