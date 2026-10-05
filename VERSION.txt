@@ -1,4 +1,4 @@
 TestSavvy Pretty Printer V4
-Version: 4.0.0-alpha2
-Focus: Execution-result PDF -> queryable multimodal execution corpus
-Validated: 2026-08-07 combined report, 8,878 pages, 137 executions, 0 result/metadata/scenario validation mismatches
+Version: 4.1.0-alpha1
+Focus: TestSavvy execution-result intelligence plus general Vantage/Advantage PDF -> Markdown conversion
+General PDF engine: OpenDataLoader PDF
