@@ -58,15 +58,21 @@ The default general-document settings use:
 
 ## Windows setup
 
-Run once:
+Base Pretty Printer setup:
 
 ```bat
 setup_windows.cmd
 ```
 
-The setup script creates `.venv`, installs `requirements.txt`, and checks whether Java is available.
+This creates `.venv` and installs the core Pretty Printer dependencies.
 
-TestSavvy execution-result parsing does not require Java. General PDF -> Markdown conversion through OpenDataLoader requires Java 11 or newer.
+For general Vantage/Advantage PDF -> Markdown support, run the additional setup:
+
+```bat
+setup_vantage_pdf_to_markdown.cmd
+```
+
+That script verifies Java 11+ and installs the optional OpenDataLoader dependency from `requirements_general_pdf.txt`. TestSavvy execution-result parsing remains independent of Java/OpenDataLoader.
 
 ## TestSavvy execution-result quick start
 
@@ -89,19 +95,25 @@ validate_pdf.cmd "C:\path\to\combined_results.pdf"
 
 A dedicated batch runner is included because OpenDataLoader can process an entire directory with one JVM rather than starting Java once per PDF.
 
-1. Put all Vantage/Advantage PDFs under:
+1. Complete the one-time general PDF setup:
+
+```bat
+setup_vantage_pdf_to_markdown.cmd
+```
+
+2. Put all Vantage/Advantage PDFs under:
 
 ```text
 inputs\
 ```
 
-2. Run:
+3. Run:
 
 ```bat
 run_vantage_pdf_to_markdown.cmd
 ```
 
-3. Markdown and extracted image assets are written under:
+4. Markdown and extracted image assets are written under:
 
 ```text
 outputs\
