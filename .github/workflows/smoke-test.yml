@@ -1,0 +1,30 @@
+name: Python smoke test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  syntax-and-config:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile Python modules
+        run: |
+          python -m py_compile pretty_printer.py
+          python -m py_compile testsavvy_pdf.py
+          python -m py_compile general_pdf.py
+          python -m py_compile vantage_pdf_to_markdown.py
+          python -m py_compile tools/validate_pdf_corpus.py
+
+      - name: Validate JSON configuration
+        run: |
+          python -m json.tool pretty_print_config.json > /dev/null
+          python -m json.tool pretty_print_config_vantage.json > /dev/null
