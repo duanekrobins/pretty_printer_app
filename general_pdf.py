@@ -56,6 +56,16 @@ def _load_opendataloader():
 
 
 def _convert_kwargs(settings: Dict[str, Any]) -> Dict[str, Any]:
+    page_separator = str(
+        settings.get(
+            "markdown_page_separator",
+            "\n\n---\n\n**Source PDF page %page-number%**\n\n",
+        )
+    )
+    # Accept either normal newline escapes parsed by JSON or literal "\\n"
+    # sequences supplied by hand-edited configuration files.
+    page_separator = page_separator.replace("\\n", "\n")
+
     kwargs: Dict[str, Any] = {
         "format": "markdown",
         "markdown_with_html": bool(settings.get("markdown_with_html", True)),
@@ -63,12 +73,7 @@ def _convert_kwargs(settings: Dict[str, Any]) -> Dict[str, Any]:
         "image_format": str(settings.get("image_format", "png")),
         "table_method": str(settings.get("table_method", "cluster")),
         "reading_order": str(settings.get("reading_order", "xycut")),
-        "markdown_page_separator": str(
-            settings.get(
-                "markdown_page_separator",
-                "\n\n---\n\n**Source PDF page %page-number%**\n\n",
-            )
-        ),
+        "markdown_page_separator": page_separator,
         "include_header_footer": bool(settings.get("include_header_footer", False)),
         "keep_line_breaks": bool(settings.get("keep_line_breaks", False)),
         "threads": str(settings.get("threads", "1")),
