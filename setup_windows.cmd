@@ -12,6 +12,17 @@ call ".venv\Scripts\activate.bat"
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
+echo.
+where java >nul 2>&1
+if errorlevel 1 (
+    echo WARNING: Java was not found on PATH.
+    echo TestSavvy execution-result PDF processing can still run.
+    echo General/Vantage PDF-to-Markdown conversion requires Java 11 or newer.
+) else (
+    echo Java runtime found:
+    java -version
+)
+
 if errorlevel 1 (
     echo.
     echo Setup failed.
