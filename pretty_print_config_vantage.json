@@ -1,0 +1,54 @@
+{
+    "input_dirs": [
+        "./inputs"
+    ],
+    "output_dir": "./outputs",
+    "file_types": [
+        "pdf"
+    ],
+    "recursive": true,
+    "overwrite": true,
+    "indent": 4,
+    "json_sort_keys": true,
+    "preserve_xml_declaration": true,
+    "xml_encoding": "utf-8",
+    "output_structure": "mirror",
+    "output_extension": ".md",
+    "exclude_patterns": [],
+    "xml_markdown_mode": "per_file",
+    "combined_output_filename": "combined_output.md",
+    "xml_output_mode": "testsavvy_execution_report",
+    "excel_markdown_mode": "per_sheet",
+    "excel_include_empty_sheets": false,
+    "excel_max_cell_length": 500,
+    "excel_sheet_name_in_filename": true,
+    "include_xml_inventory": true,
+    "generate_notebooklm_guide": false,
+    "notebooklm_guide_filename": "NOTEBOOKLM_TESTSAVVY_XML_JSON_ORDERING_GUIDE.md",
+    "notebooklm_enhanced_format": true,
+    "normalize_markdown_filenames": true,
+    "json_output_mode": "testsavvy_smart",
+    "include_json_inventory": true,
+    "json_inventory_max_rows": 5000,
+    "json_table_max_rows": 10000,
+    "process_zip_files": true,
+    "pdf_settings": {
+        "mode": "general_markdown",
+        "general_output_subdir": "",
+        "general_markdown": {
+            "markdown_with_html": true,
+            "image_output": "external",
+            "image_format": "png",
+            "table_method": "cluster",
+            "reading_order": "xycut",
+            "markdown_page_separator": "\\n\\n---\\n\\n**Source PDF page %page-number%**\\n\\n",
+            "include_header_footer": false,
+            "keep_line_breaks": false,
+            "threads": "1",
+            "quiet": false,
+            "hybrid_enabled": false,
+            "hybrid_backend": "docling-fast",
+            "hybrid_mode": "auto"
+        }
+    }
+}
